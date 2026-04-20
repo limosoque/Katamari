@@ -1,6 +1,8 @@
 #include "Mesh.h"
 #include "Game.h"
 #include <stdexcept>
+#include "WICTextureLoader.h" 
+
 
 void Mesh::Upload(Game* game, const MeshData& data)
 {
@@ -46,4 +48,13 @@ void Mesh::Bind(ID3D11DeviceContext* ctx) const
 void Mesh::Draw(ID3D11DeviceContext* ctx) const
 {
     ctx->DrawIndexed(indexCount, 0, 0);
+}
+
+void Mesh::LoadTexture(ID3D11Device* device, const std::wstring& path)
+{
+    HRESULT hr = DirectX::CreateWICTextureFromFile(device, path.c_str(), nullptr, textureView.GetAddressOf());
+
+    if (FAILED(hr)) {
+        OutputDebugStringW((L"Failed to load texture: " + path + L"\n").c_str());
+    }
 }

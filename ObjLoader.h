@@ -3,7 +3,6 @@
 #include <string>
 #include <DirectXMath.h>
 
-/// Single vertex with position, normal, and UV.
 struct MeshVertex
 {
     DirectX::XMFLOAT3 Position;
@@ -11,13 +10,11 @@ struct MeshVertex
     DirectX::XMFLOAT2 UV;
 };
 
-/// Raw mesh data returned by ObjLoader.
 struct MeshData
 {
     std::vector<MeshVertex> Vertices;
     std::vector<uint32_t>   Indices;
 
-    /// Axis-aligned bounding sphere radius (centered at local origin after centering).
     float BoundingRadius = 0.0f;
 };
 

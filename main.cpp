@@ -7,38 +7,40 @@ int main()
 {
     try
     {
-        Game game(L"Katamari", 1280, 720);
+        Game game(L"Katamari", 1920, 1080);
 
-        // Уменьшаем масштабы объектов, чтобы они были меньше начального радиуса шара (1.0)
-        // Теперь объекты будут иметь радиус примерно 0.2 - 0.7
+        //scale objects
         std::vector<ObjectDesc> objects =
         {
-            { "assets/childrens_chair.obj",        10, 0.01f, 0.015f },
-            { "assets/Creeper.obj",                10, 0.1f, 0.25f },
-            { "assets/obj.obj",                    12, 0.015f, 0.03f },
-            { "assets/seashell_rapan-sl-0.obj",    12, 0.1f, 0.3f },
+            { "assets/childrens_chair/childrens_chair.obj", L"assets/childrens_chair/childrens_chair_Albedo.png", PlacementType::Upright, 10, 0.02f, 0.025f, 0.02f},
+            { "assets/creeper/CreeperZ.obj", L"assets/creeper/creeper.png", PlacementType::Upright, 10, 0.3f, 0.5f, 0.02f },
+            { "assets/woman/obj.obj", L"assets/childrens_chair/childrens_chair_Normal.png", PlacementType::Upright, 12, 0.015f, 0.03f, 0.02f },
+            { "assets/seashell/seashell_rapan-sl-0.obj", L"assets/seashell/rapana_diffuse.png", PlacementType::Flat, 12, 0.05f, 0.2f, -0.2f },
+            { "assets/mouse/W_hlmaus.obj", L"assets/mouse/Feldmaus_Diffuse.png", PlacementType::Flat, 12, 0.001f, 0.003f, 0.02f }
         };
 
         auto katamari = std::make_unique<KatamariComponent>(
             &game,
             objects,
-            L"shaders/Katamari.hlsl",   // путь к шейдеру относительно .exe
-            80.0f                        // радиус игровой зоны
+            L"assets/ball/basketball/ball_basecolor.png",
+            L"assets/ground/forrest_ground_01_diff_4k.jpg",
+            L"shaders/Katamari.hlsl",
+            20.0f                    
         );
 
         KatamariComponent* kPtr = katamari.get();
         game.AddComponent(std::move(katamari));
 
         std::cout << "Controls:\n"
-            << "  W / S / A / D  or  Arrow keys  —  move the ball\n"
-            << "  Q / E                           —  rotate camera left / right\n"
-            << "  Esc                             —  quit\n\n";
+            << "W/A/S/D - move the ball\n"
+            << "Q/E - rotate camera left/right\n"
+            << "Esc - quit\n\n";
 
         game.Run();
 
         std::cout << "Session ended.\n"
-            << "  Absorbed : " << kPtr->AbsorbedCount() << '\n'
-            << "  Ball r   : " << kPtr->BallRadius() << '\n';
+            << "Absorbed: " << kPtr->AbsorbedCount() << '\n'
+            << "Ball radius: " << kPtr->BallRadius() << '\n';
     }
     catch (const std::exception& e)
     {

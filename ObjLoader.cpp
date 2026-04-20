@@ -2,28 +2,22 @@
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
-#include <unordered_map>
+#include <map>
 #include <algorithm>
 #include <cmath>
 
 using namespace DirectX;
 
-// ─── helpers ─────────────────────────────────────────────────────────────────
-
 struct FaceIndex
 {
     int v = 0, vt = 0, vn = 0;
     bool operator==(const FaceIndex& o) const { return v == o.v && vt == o.vt && vn == o.vn; }
-};
 
-struct FaceIndexHash
-{
-    size_t operator()(const FaceIndex& f) const
+    bool operator<(const FaceIndex& o) const
     {
-        size_t h = std::hash<int>{}(f.v);
-        h ^= std::hash<int>{}(f.vt) + 0x9e3779b9 + (h << 6) + (h >> 2);
-        h ^= std::hash<int>{}(f.vn) + 0x9e3779b9 + (h << 6) + (h >> 2);
-        return h;
+        if (v != o.v) return v < o.v;
+        if (vt != o.vt) return vt < o.vt;
+        return vn < o.vn;
     }
 };
 
@@ -45,8 +39,6 @@ static FaceIndex ParseVertex(const std::string& token)
     return fi;
 }
 
-// ─── ObjLoader::Load ─────────────────────────────────────────────────────────
-
 MeshData ObjLoader::Load(const std::string& path)
 {
     std::ifstream file(path);
@@ -58,7 +50,7 @@ MeshData ObjLoader::Load(const std::string& path)
     std::vector<XMFLOAT2> uvs;
 
     MeshData result;
-    std::unordered_map<FaceIndex, uint32_t, FaceIndexHash> indexCache;
+    std::map<FaceIndex, uint32_t> indexCache;
 
     auto resolveVertex = [&](const FaceIndex& fi) -> uint32_t
     {
@@ -108,7 +100,7 @@ MeshData ObjLoader::Load(const std::string& path)
         {
             XMFLOAT2 uv;
             ss >> uv.x >> uv.y;
-            uv.y = 1.0f - uv.y;   // flip V for D3D
+            uv.y = 1.0f - uv.y;   //flip V for D3D
             uvs.push_back(uv);
         }
         else if (token == "f")

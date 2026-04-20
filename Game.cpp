@@ -10,8 +10,6 @@
 
 using Microsoft::WRL::ComPtr;
 
-// ─── Construction / Destruction ───────────────────────────────────────────────
-
 Game::Game(std::wstring title, int width, int height)
     : appTitle(std::move(title))
     , screenWidth(width)
@@ -38,21 +36,19 @@ void Game::Initialize()
     CreateBackBuffer();
 }
 
-// ─── Raw Input registration ───────────────────────────────────────────────────
-
 void Game::RegisterRawInput()
 {
     RAWINPUTDEVICE rid[2] = {};
 
     // Keyboard
-    rid[0].usUsagePage = 0x01;   // HID_USAGE_PAGE_GENERIC
-    rid[0].usUsage     = 0x06;   // HID_USAGE_GENERIC_KEYBOARD
+    rid[0].usUsagePage = 0x01;   //HID_USAGE_PAGE_GENERIC
+    rid[0].usUsage     = 0x06;   //HID_USAGE_GENERIC_KEYBOARD
     rid[0].dwFlags     = 0;
     rid[0].hwndTarget  = Display->hWnd;
 
     // Mouse
-    rid[1].usUsagePage = 0x01;   // HID_USAGE_PAGE_GENERIC
-    rid[1].usUsage     = 0x02;   // HID_USAGE_GENERIC_MOUSE
+    rid[1].usUsagePage = 0x01;   //HID_USAGE_PAGE_GENERIC
+    rid[1].usUsage     = 0x02;   //HID_USAGE_GENERIC_MOUSE
     rid[1].dwFlags     = 0;
     rid[1].hwndTarget  = Display->hWnd;
 

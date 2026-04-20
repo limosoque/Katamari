@@ -11,22 +11,28 @@
 using namespace DirectX;
 using Microsoft::WRL::ComPtr;
 
-// ─── Constructor ─────────────────────────────────────────────────────────────
+//for clamp work
+template<typename T>
+static T Clamp(T val, T lo, T hi) {
+    return (val < lo) ? lo : (val > hi) ? hi : val;
+}
 
 KatamariComponent::KatamariComponent(
     Game* owner,
     std::vector<ObjectDesc> descs,
-    std::wstring            shaderPath,
-    float                   sceneRad)
-    : GameComponent(owner)
-    , objectDescs(std::move(descs))
-    , shaderPath(std::move(shaderPath))
-    , sceneRadius(sceneRad)
+    std::wstring ballTex,
+    std::wstring floorTex,
+    std::wstring shaderPath,
+    float sceneRad)
+    : GameComponent(owner),
+    objectDescs(std::move(descs)), 
+    ballTexPath(std::move(ballTex)),
+    floorTexPath(std::move(floorTex)),
+    shaderPath(std::move(shaderPath)),
+    sceneRadius(sceneRad)
 {
     XMStoreFloat4x4(&ballOrientMtx, XMMatrixIdentity());
 }
-
-// ─── Initialize ──────────────────────────────────────────────────────────────
 
 void KatamariComponent::Initialize()
 {
@@ -34,6 +40,9 @@ void KatamariComponent::Initialize()
     CreateInputLayout();
     CreateConstantBuffer();
     CreateRasterizerState();
+    CreateDepthStencilState();
+    CreateBlendState();
+    CreateSamplerState();
 
     BuildBallMesh();
     BuildObjectMeshes();
@@ -45,8 +54,6 @@ void KatamariComponent::Initialize()
     camera.AspectRatio = static_cast<float>(game->Display->ClientWidth) /
         static_cast<float>(game->Display->ClientHeight);
 }
-
-// ─── Shader compilation (from file) ──────────────────────────────────────────
 
 void KatamariComponent::CompileShaders()
 {
@@ -83,8 +90,6 @@ void KatamariComponent::CompileShaders()
     if (FAILED(hr)) throw std::runtime_error("CreatePixelShader failed.");
 }
 
-// ─── Input layout ────────────────────────────────────────────────────────────
-
 void KatamariComponent::CreateInputLayout()
 {
     D3D11_INPUT_ELEMENT_DESC elems[] =
@@ -100,8 +105,6 @@ void KatamariComponent::CreateInputLayout()
     if (FAILED(hr)) throw std::runtime_error("CreateInputLayout failed.");
 }
 
-// ─── Constant buffer ─────────────────────────────────────────────────────────
-
 void KatamariComponent::CreateConstantBuffer()
 {
     D3D11_BUFFER_DESC desc = {};
@@ -113,25 +116,61 @@ void KatamariComponent::CreateConstantBuffer()
     if (FAILED(hr)) throw std::runtime_error("CreateBuffer (CB) failed.");
 }
 
-// ─── Rasterizer ──────────────────────────────────────────────────────────────
-
 void KatamariComponent::CreateRasterizerState()
 {
     CD3D11_RASTERIZER_DESC desc(D3D11_DEFAULT);
     desc.CullMode = D3D11_CULL_BACK;
     desc.FillMode = D3D11_FILL_SOLID;
+    desc.FrontCounterClockwise = FALSE;
+    desc.DepthClipEnable = TRUE;
     HRESULT hr = game->Device->CreateRasterizerState(&desc, rastState.GetAddressOf());
     if (FAILED(hr)) throw std::runtime_error("CreateRasterizerState failed.");
 }
 
-// ─── Mesh builders ───────────────────────────────────────────────────────────
+void KatamariComponent::CreateDepthStencilState()
+{
+    D3D11_DEPTH_STENCIL_DESC dsDesc = {};
+    dsDesc.DepthEnable = TRUE;
+    dsDesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
+    dsDesc.DepthFunc = D3D11_COMPARISON_LESS;
+
+    dsDesc.StencilEnable = FALSE;
+
+    HRESULT hr = game->Device->CreateDepthStencilState(&dsDesc, depthState.GetAddressOf());
+    if (FAILED(hr)) throw std::runtime_error("Failed to create DepthStencilState");
+}
+
+void KatamariComponent::CreateBlendState()
+{
+    D3D11_BLEND_DESC blendDesc = {};
+    blendDesc.RenderTarget[0].BlendEnable = FALSE;
+    blendDesc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+
+    HRESULT hr = game->Device->CreateBlendState(&blendDesc, blendState.GetAddressOf());
+    if (FAILED(hr)) throw std::runtime_error("Failed to create BlendState");
+}
+
+void KatamariComponent::CreateSamplerState()
+{
+    D3D11_SAMPLER_DESC sampDesc = {};
+    sampDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+    sampDesc.AddressU = D3D11_TEXTURE_ADDRESS_WRAP; //Tile texture
+    sampDesc.AddressV = D3D11_TEXTURE_ADDRESS_WRAP;
+    sampDesc.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
+    sampDesc.ComparisonFunc = D3D11_COMPARISON_NEVER;
+    sampDesc.MinLOD = 0;
+    sampDesc.MaxLOD = D3D11_FLOAT32_MAX;
+
+    HRESULT hr = game->Device->CreateSamplerState(&sampDesc, samplerState.GetAddressOf());
+    if (FAILED(hr)) throw std::runtime_error("Failed to create SamplerState");
+}
 
 void KatamariComponent::BuildBallMesh()
 {
-    MeshData md = MeshGenerator::CreateSphere(1.0f, 32, 32);
+    MeshData md = MeshGenerator::CreateSphere(ballRadius, ballStacks, ballSlices);
     ballMesh = std::make_shared<Mesh>();
     ballMesh->Upload(game, md);
-    ballRadius = 1.0f;
+    ballMesh->LoadTexture(game->Device.Get(), ballTexPath);
 }
 
 void KatamariComponent::BuildObjectMeshes()
@@ -142,6 +181,7 @@ void KatamariComponent::BuildObjectMeshes()
         MeshData md = ObjLoader::Load(desc.objPath);
         auto mesh = std::make_shared<Mesh>();
         mesh->Upload(game, md);
+        mesh->LoadTexture(game->Device.Get(), desc.texPath);
         meshPool.push_back(std::move(mesh));
     }
 }
@@ -149,32 +189,65 @@ void KatamariComponent::BuildObjectMeshes()
 void KatamariComponent::BuildFloorMesh()
 {
     float S = sceneRadius;
+    int gridResolution = 100;
+    float step = (2.0f * S) / gridResolution;
+
     MeshData md;
-    md.Vertices =
-    {
-        { XMFLOAT3(-S, 0,-S), XMFLOAT3(0,1,0), XMFLOAT2(0,0) },
-        { XMFLOAT3(S, 0,-S), XMFLOAT3(0,1,0), XMFLOAT2(1,0) },
-        { XMFLOAT3(S, 0, S), XMFLOAT3(0,1,0), XMFLOAT2(1,1) },
-        { XMFLOAT3(-S, 0, S), XMFLOAT3(0,1,0), XMFLOAT2(0,1) },
-    };
-    md.Indices = { 0, 2, 1,  0, 3, 2 };
-    md.BoundingRadius = S * 1.414f;
+
+    float textureRepeat = 5.f;
+
+    //vertexes generation
+    for (int i = 0; i <= gridResolution; ++i) {
+        for (int j = 0; j <= gridResolution; ++j) {
+            float x = -S + j * step;
+            float z = -S + i * step;
+            float y = GetTerrainHeight(x, z);
+
+            MeshVertex v;
+            v.Position = { x, y, z };
+            v.UV = { (float)j / gridResolution * textureRepeat, (float)i / gridResolution * textureRepeat };
+
+            //normal calculation for lighting
+            float eps = 0.1f;
+            float hX = GetTerrainHeight(x + eps, z) - GetTerrainHeight(x - eps, z);
+            float hZ = GetTerrainHeight(x, z + eps) - GetTerrainHeight(x, z - eps);
+            XMVECTOR normal = XMVector3Normalize(XMVectorSet(-hX, 2.0f * eps, -hZ, 0.0f));
+            XMStoreFloat3(&v.Normal, normal);
+
+            md.Vertices.push_back(v);
+        }
+    }
+
+    //indexes generation
+    for (int i = 0; i < gridResolution; ++i) {
+        for (int j = 0; j < gridResolution; ++j) {
+            int stride = gridResolution + 1;
+            int v0 = i * stride + j;
+            int v1 = i * stride + (j + 1);
+            int v2 = (i + 1) * stride + j;
+            int v3 = (i + 1) * stride + (j + 1);
+
+            md.Indices.push_back(v0); md.Indices.push_back(v2); md.Indices.push_back(v1);
+            md.Indices.push_back(v1); md.Indices.push_back(v2); md.Indices.push_back(v3);
+        }
+    }
+
     floorMesh = std::make_shared<Mesh>();
     floorMesh->Upload(game, md);
+    floorMesh->LoadTexture(game->Device.Get(), floorTexPath);
 }
-
-// ─── Scatter ─────────────────────────────────────────────────────────────────
 
 void KatamariComponent::ScatterObjects()
 {
     static const XMFLOAT4 kPalette[] =
     {
-        XMFLOAT4(1.0f, 0.35f, 0.35f, 1.0f),
-        XMFLOAT4(0.35f, 1.0f, 0.45f, 1.0f),
-        XMFLOAT4(0.35f, 0.55f, 1.0f,  1.0f),
-        XMFLOAT4(1.0f, 0.90f, 0.20f,  1.0f),
-        XMFLOAT4(1.0f, 0.50f, 0.0f,   1.0f),
-        XMFLOAT4(0.80f, 0.20f, 1.0f,  1.0f),
+        XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f)
+        //XMFLOAT4(1.0f, 0.35f, 0.35f, 1.0f),
+        //XMFLOAT4(0.35f, 1.0f, 0.45f, 1.0f),
+        //XMFLOAT4(0.35f, 0.55f, 1.0f, 1.0f),
+        //XMFLOAT4(1.0f, 0.90f, 0.20f, 1.0f),
+        //XMFLOAT4(1.0f, 0.50f, 0.0f, 1.0f),
+        //XMFLOAT4(0.80f, 0.20f, 1.0f, 1.0f),
     };
     const int pal = static_cast<int>(std::size(kPalette));
 
@@ -192,23 +265,40 @@ void KatamariComponent::ScatterObjects()
             obj.worldRadius = obj.scale * mesh->BoundingRadius();
             obj.color = kPalette[ci++ % pal];
 
-            float minDist = 6.0f;
-            float r, angle;
-            do {
-                r = RandomFloat(minDist, sceneRadius - obj.worldRadius);
-                angle = RandomFloat(0.0f, XM_2PI);
-            } while (r < minDist);
+            float r = RandomFloat(spawnMinDist, sceneRadius - obj.worldRadius);
+            float angle = RandomFloat(0.0f, XM_2PI);
 
-            obj.position = XMFLOAT3(r * std::sin(angle), obj.worldRadius, r * std::cos(angle));
-            obj.rotation = XMFLOAT3(RandomFloat(0, XM_2PI), RandomFloat(0, XM_2PI), RandomFloat(0, XM_2PI));
+            float x = r * std::sin(angle);
+            float z = r * std::cos(angle);
+            float y = GetTerrainHeight(x, z);
+            XMVECTOR terrainNormal = GetTerrainNormal(x, z);
 
-            XMStoreFloat4x4(&obj.localRotation, XMMatrixIdentity());
+            obj.position = XMFLOAT3(x, y + obj.worldRadius + desc.yOffset, z);
+            XMVECTOR finalQuat;
+            XMVECTOR localUp = XMVectorSet(0, 1, 0, 0);
+
+            if (desc.placement == PlacementType::Upright || desc.placement == PlacementType::Flat)
+            {
+                XMVECTOR localUp = XMVectorSet(0, 1, 0, 0);
+
+                //rotation to terrain
+                XMVECTOR terrainQuat = GetRotationBetweenVectors(localUp, terrainNormal);
+
+                float randomYaw = RandomFloat(0, XM_2PI);
+                XMVECTOR yawQuat = XMQuaternionRotationAxis(localUp, randomYaw);
+
+                finalQuat = XMQuaternionMultiply(yawQuat, terrainQuat);
+            }
+            else {
+                //random for others
+                finalQuat = XMQuaternionRotationRollPitchYaw(RandomFloat(0, XM_2PI), RandomFloat(0, XM_2PI), RandomFloat(0, XM_2PI));
+            }
+
+            XMStoreFloat4x4(&obj.localRotation, XMMatrixRotationQuaternion(finalQuat));
             objects.push_back(std::move(obj));
         }
     }
 }
-
-// ─── Update ──────────────────────────────────────────────────────────────────
 
 void KatamariComponent::Update(float dt)
 {
@@ -224,12 +314,9 @@ void KatamariComponent::Update(float dt)
 void KatamariComponent::UpdateBallPhysics(float dt)
 {
     auto* input = game->Input.get();
-    const float speed = 7.0f + ballRadius * 0.3f;
+    const float speed = ballSpeed + ballRadius * 0.3f;
 
-    // Вектор Forward: куда смотрит камера в плоскости XZ
     XMVECTOR forward = XMVectorSet(-std::sin(cameraYaw), 0.0f, -std::cos(cameraYaw), 0.0f);
-    // ИСПРАВЛЕНИЕ: Вектор Right должен быть перпендикулярен Forward. 
-    // Для инверсии движения влево-вправо меняем знаки здесь:
     XMVECTOR right = XMVectorSet(-std::cos(cameraYaw), 0.0f, std::sin(cameraYaw), 0.0f);
 
     XMVECTOR move = XMVectorZero();
@@ -241,37 +328,34 @@ void KatamariComponent::UpdateBallPhysics(float dt)
     if (input->IsKeyDown('Q')) cameraYaw -= 1.5f * dt;
     if (input->IsKeyDown('E')) cameraYaw += 1.5f * dt;
 
+    XMVECTOR posV = XMLoadFloat3(&ballPos);
     float moveLen = XMVectorGetX(XMVector3Length(move));
     if (moveLen > 0.001f)
     {
-        move = XMVectorScale(move, speed * dt / moveLen);
+        XMVECTOR moveDelta = XMVectorScale(move, speed * dt / moveLen);
+        posV = XMVectorAdd(posV, moveDelta);
 
+        //Visual rotaiton
         XMVECTOR up = XMVectorSet(0, 1, 0, 0);
         XMVECTOR rollAxis = XMVector3Normalize(XMVector3Cross(up, move));
-        float    angle = (speed * dt) / ballRadius;
-
+        float angle = (speed * dt) / ballRadius;
         XMVECTOR q = XMQuaternionRotationAxis(rollAxis, angle);
         XMMATRIX rot = XMMatrixRotationQuaternion(q);
         XMMATRIX prev = XMLoadFloat4x4(&ballOrientMtx);
         XMStoreFloat4x4(&ballOrientMtx, prev * rot);
-
-        XMVECTOR pos = XMLoadFloat3(&ballPos);
-        pos = XMVectorAdd(pos, move);
-
-        float px = XMVectorGetX(pos);
-        float pz = XMVectorGetZ(pos);
-        float d = std::sqrt(px * px + pz * pz);
-        float lim = sceneRadius - ballRadius;
-        if (d > lim) { float s = lim / d; px *= s; pz *= s; }
-        pos = XMVectorSetX(pos, px);
-        pos = XMVectorSetZ(pos, pz);
-        XMStoreFloat3(&ballPos, pos);
     }
 
-    ballPos.y = ballRadius;
-}
+    //border moving 
+    float px = XMVectorGetX(posV);
+    float pz = XMVectorGetZ(posV);
+    float lim = sceneRadius - ballRadius;
+  
+    px = Clamp(px, -lim, lim);
+    pz = Clamp(pz, -lim, lim);
+    float py = GetTerrainHeight(px, pz) + ballRadius;
 
-// ─── Absorption ───────────────────────────────────────────────────────────────
+    ballPos = XMFLOAT3(px, py, pz);
+}
 
 void KatamariComponent::CheckAbsorption()
 {
@@ -279,8 +363,7 @@ void KatamariComponent::CheckAbsorption()
     {
         if (obj.absorbed) continue;
 
-        // ОБЪЕКТ ДОЛЖЕН БЫТЬ МЕНЬШЕ ШАРА, чтобы его можно было подобрать
-        // Если он больше — мы просто катимся мимо (или упираемся, но тут нет коллизий стен)
+		//Check object is smaller than ball
         if (obj.worldRadius >= ballRadius) continue;
 
         float dx = obj.position.x - ballPos.x;
@@ -288,8 +371,6 @@ void KatamariComponent::CheckAbsorption()
         float dz = obj.position.z - ballPos.z;
         float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
 
-        // ИСПРАВЛЕНИЕ: Смягчаем условие дистанции. 
-        // Объект поглощается, если расстояние меньше суммы радиусов с небольшим запасом.
         if (dist >= ballRadius + obj.worldRadius * 0.8f) continue;
 
         obj.absorbed = true;
@@ -304,29 +385,34 @@ void KatamariComponent::CheckAbsorption()
 
         XMVECTOR dirL = XMVector3TransformNormal(dirW, ballOrientInv);
 
-        // Позиционируем объект точно на поверхности шара в локальных координатах
+		//store object offset from ball center in local space
         float surfaceOffset = 1.0f + (obj.worldRadius * 0.5f) / ballRadius;
         XMVECTOR offsetL = XMVectorScale(XMVector3Normalize(dirL), surfaceOffset);
         XMStoreFloat3(&obj.localOffset, offsetL);
 
-        XMMATRIX objRot = XMMatrixRotationRollPitchYaw(
-            obj.rotation.x, obj.rotation.y, obj.rotation.z);
+        XMMATRIX objRot = XMLoadFloat4x4(&obj.localRotation);
         XMMATRIX localRot = objRot * ballOrientInv;
         XMStoreFloat4x4(&obj.localRotation, localRot);
 
-        // Рост шара
+        //ball radius increase
         float rb3 = ballRadius * ballRadius * ballRadius;
         float ro3 = obj.worldRadius * obj.worldRadius * obj.worldRadius;
-        ballRadius = std::cbrt(rb3 + ro3 * 0.3f); // корень кубический из суммы объемов
+        ballRadius = std::cbrt(rb3 + ro3 * 0.3f);
 
         std::cout << "[Katamari] Absorbed #" << absorbedCount
-            << "  ballRadius=" << ballRadius << '\n';
+            << " ballRadius = " << ballRadius << '\n';
     }
 }
 
 void KatamariComponent::Draw()
 {
     auto* ctx = game->Context.Get();
+
+    ctx->OMSetDepthStencilState(depthState.Get(), 0);
+    float blendFactor[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    ctx->OMSetBlendState(blendState.Get(), blendFactor, 0xFFFFFFFF);
+    ctx->PSSetSamplers(0, 1, samplerState.GetAddressOf());
+
     ctx->RSSetState(rastState.Get());
     ctx->IASetInputLayout(inputLayout.Get());
     ctx->VSSetShader(vertexShader.Get(), nullptr, 0);
@@ -372,7 +458,11 @@ void KatamariComponent::SetConstantBuffer(
 
 void KatamariComponent::DrawBall(const XMMATRIX& v, const XMMATRIX& p, const XMFLOAT3& cam)
 {
-    SetConstantBuffer(BallWorldMatrix(), v, p, XMFLOAT4(0.9f, 0.85f, 0.1f, 1.0f), cam);
+    SetConstantBuffer(BallWorldMatrix(), v, p, ballColor, cam);
+
+    ID3D11ShaderResourceView* srv = ballMesh->GetTexture();
+    game->Context->PSSetShaderResources(0, 1, &srv);
+
     ballMesh->Bind(game->Context.Get());
     ballMesh->Draw(game->Context.Get());
 }
@@ -381,6 +471,10 @@ void KatamariComponent::DrawFreeObject(const SceneObject& obj,
     const XMMATRIX& v, const XMMATRIX& p, const XMFLOAT3& cam)
 {
     SetConstantBuffer(FreeObjectWorldMatrix(obj), v, p, obj.color, cam);
+
+    ID3D11ShaderResourceView* srv = obj.mesh->GetTexture();
+    game->Context->PSSetShaderResources(0, 1, &srv);
+
     obj.mesh->Bind(game->Context.Get());
     obj.mesh->Draw(game->Context.Get());
 }
@@ -389,13 +483,21 @@ void KatamariComponent::DrawStuckObject(const SceneObject& obj,
     const XMMATRIX& v, const XMMATRIX& p, const XMFLOAT3& cam)
 {
     SetConstantBuffer(StuckObjectWorldMatrix(obj), v, p, obj.color, cam);
+
+    ID3D11ShaderResourceView* srv = obj.mesh->GetTexture();
+    game->Context->PSSetShaderResources(0, 1, &srv);
+
     obj.mesh->Bind(game->Context.Get());
     obj.mesh->Draw(game->Context.Get());
 }
 
 void KatamariComponent::DrawFloor(const XMMATRIX& v, const XMMATRIX& p, const XMFLOAT3& cam)
 {
-    SetConstantBuffer(XMMatrixIdentity(), v, p, XMFLOAT4(0.25f, 0.55f, 0.25f, 1.0f), cam);
+    SetConstantBuffer(XMMatrixIdentity(), v, p, floorColor, cam);
+
+    ID3D11ShaderResourceView* srv = floorMesh->GetTexture();
+    game->Context->PSSetShaderResources(0, 1, &srv);
+
     floorMesh->Bind(game->Context.Get());
     floorMesh->Draw(game->Context.Get());
 }
@@ -411,7 +513,7 @@ XMMATRIX KatamariComponent::BallWorldMatrix() const
 XMMATRIX KatamariComponent::FreeObjectWorldMatrix(const SceneObject& obj) const
 {
     XMMATRIX S = XMMatrixScaling(obj.scale, obj.scale, obj.scale);
-    XMMATRIX R = XMMatrixRotationRollPitchYaw(obj.rotation.x, obj.rotation.y, obj.rotation.z);
+    XMMATRIX R = XMLoadFloat4x4(&obj.localRotation);
     XMMATRIX T = XMMatrixTranslation(obj.position.x, obj.position.y, obj.position.z);
     return S * R * T;
 }
@@ -432,6 +534,8 @@ XMMATRIX KatamariComponent::StuckObjectWorldMatrix(const SceneObject& obj) const
 void KatamariComponent::DestroyResources()
 {
     rastState.Reset();
+    depthState.Reset();
+    blendState.Reset();
     constantBuffer.Reset();
     inputLayout.Reset();
     pixelShader.Reset();
@@ -446,4 +550,49 @@ void KatamariComponent::DestroyResources()
 float KatamariComponent::RandomFloat(float lo, float hi)
 {
     return lo + std::uniform_real_distribution<float>(0.0f, 1.0f)(rng) * (hi - lo);
+}
+
+float KatamariComponent::GetTerrainHeight(float x, float z) const
+{
+    float amplitude = 2.0f;
+    float frequency = 0.2f;
+    return std::sin(x * frequency) * std::cos(z * frequency) * amplitude;
+}
+
+XMVECTOR KatamariComponent::GetTerrainNormal(float x, float z) const
+{
+    float eps = 0.05f; //offset
+    //take 2 points near by x and z
+    float hL = GetTerrainHeight(x - eps, z);
+    float hR = GetTerrainHeight(x + eps, z);
+    float hD = GetTerrainHeight(x, z - eps);
+    float hU = GetTerrainHeight(x, z + eps);
+
+    XMVECTOR normal = XMVectorSet(hL - hR, 2.0f * eps, hD - hU, 0.0f);
+    return XMVector3Normalize(normal);
+}
+
+XMVECTOR KatamariComponent::GetRotationBetweenVectors(XMVECTOR from, XMVECTOR to)
+{
+    from = XMVector3Normalize(from);
+    to = XMVector3Normalize(to);
+
+    float dot = XMVectorGetX(XMVector3Dot(from, to));
+
+    //dont need rotation if vectors near
+    if (dot > 0.9999f) return XMQuaternionIdentity();
+
+    //different direction
+    if (dot < -0.9999f)
+    {
+        //rotate to each other
+        return XMQuaternionRotationAxis(XMVectorSet(1, 0, 0, 0), XM_PI);
+    }
+
+    //axis is vector cross 
+    XMVECTOR axis = XMVector3Normalize(XMVector3Cross(from, to));
+    //angle of rotation
+    float angle = acosf(dot);
+
+    return XMQuaternionRotationAxis(axis, angle);
 }
