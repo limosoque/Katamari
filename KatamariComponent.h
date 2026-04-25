@@ -4,6 +4,7 @@
 #include "Camera.h"
 #include "ObjLoader.h"
 #include "MeshGenerator.h"
+#include "Material.h"
 #include "DisplayWin32.h"
 
 #include <d3d11.h>
@@ -16,14 +17,23 @@
 #include <memory>
 #include <random>
 
+
 struct alignas(16) PerObjectCB
 {
-    DirectX::XMFLOAT4X4 Model;
-    DirectX::XMFLOAT4X4 View;
-    DirectX::XMFLOAT4X4 Projection;
-    DirectX::XMFLOAT4 Color;
-    DirectX::XMFLOAT4 LightDir;
-    DirectX::XMFLOAT4 CameraPos;
+    DirectX::XMFLOAT4X4 WorldMatrix;
+    DirectX::XMFLOAT4X4 ViewMatrix;
+    DirectX::XMFLOAT4X4 ProjectionMatrix;
+
+    DirectX::XMFLOAT4 MaterialAmbientColor;
+    DirectX::XMFLOAT4 MaterialDiffuseColor;
+	DirectX::XMFLOAT4 MaterialSpecularColor;
+	
+    float MaterialShininess;
+    float Padding[3];
+
+    DirectX::XMFLOAT4 SunlightColor;
+    DirectX::XMFLOAT4 SunlightDirection;
+    DirectX::XMFLOAT4 CameraPosition;
 };
 
 struct SceneObject
@@ -36,6 +46,7 @@ struct SceneObject
     float scale = 1.0f;
     float worldRadius = 1.0f;
     DirectX::XMFLOAT4 color = { 1, 1, 1, 1 };
+    Material material = Material::Plastic();
 
     bool absorbed = false;
 
@@ -58,7 +69,11 @@ struct ObjectDesc
     int count = 8;
     float minScale = 0.1f;
     float maxScale = 0.5f;
-    float yOffset;
+    float yOffset = 0.0f;
+    Material material = Material::Plastic();
+
+    ObjectDesc(std::string obj, std::wstring tex, PlacementType p, int c, float minS, float maxS, float yOff, Material m)
+        : objPath(obj), texPath(tex), placement(p), count(c), minScale(minS), maxScale(maxS), yOffset(yOff), material(m) {}
 };
 
 class KatamariComponent : public GameComponent
@@ -85,6 +100,10 @@ private:
     std::wstring shaderPath;
     float sceneRadius;
 
+    //Sun
+    DirectX::XMFLOAT4 SunlightDirection = { 0.577f, 0.577f, 0.577f, 0.0f };
+    DirectX::XMFLOAT4 SunlightColor = { 1.0f, 1.0f, 1.0f, 1.0f };
+
     //Ball
     std::shared_ptr<Mesh> ballMesh;
     float ballRadius = 1.0f;
@@ -94,6 +113,7 @@ private:
     DirectX::XMFLOAT3 ballPos = { 0, 0, 0 };
     DirectX::XMFLOAT4X4 ballOrientMtx;
     DirectX::XMFLOAT4 ballColor = { 1.f, 1.f, 1.f, 1.f };
+    Material ballMaterial = Material::Rubber();
     std::wstring ballTexPath;
 
     //Scene
@@ -104,6 +124,7 @@ private:
     //Floor
     std::shared_ptr<Mesh> floorMesh;
     DirectX::XMFLOAT4 floorColor = { 1.f, 1.f, 1.f, 1.0f };
+    Material floorMaterial = Material::Ground();
     std::wstring floorTexPath;
 
     //Camera
@@ -146,7 +167,7 @@ private:
     void DrawStuckObject(const SceneObject& obj, const DirectX::XMMATRIX& v, const DirectX::XMMATRIX& p, const DirectX::XMFLOAT3& cam);
     void DrawFloor(const DirectX::XMMATRIX& v, const DirectX::XMMATRIX& p, const DirectX::XMFLOAT3& cam);
 
-    void SetConstantBuffer(const DirectX::XMMATRIX& model, const DirectX::XMMATRIX& view, const DirectX::XMMATRIX& proj, const DirectX::XMFLOAT4& color, const DirectX::XMFLOAT3& camPos);
+    void SetConstantBuffer(const DirectX::XMMATRIX& world, const DirectX::XMMATRIX& view, const DirectX::XMMATRIX& projection, const Material& material, const DirectX::XMFLOAT3& camPos);
 
     DirectX::XMMATRIX BallWorldMatrix() const;
     DirectX::XMMATRIX FreeObjectWorldMatrix(const SceneObject&) const;

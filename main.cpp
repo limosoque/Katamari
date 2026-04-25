@@ -2,6 +2,7 @@
 #include "KatamariComponent.h"
 #include <stdexcept>
 #include <iostream>
+#include "Material.h"
 
 int main()
 {
@@ -12,11 +13,11 @@ int main()
         //scale objects
         std::vector<ObjectDesc> objects =
         {
-            { "assets/childrens_chair/childrens_chair.obj", L"assets/childrens_chair/childrens_chair_Albedo.png", PlacementType::Upright, 10, 0.02f, 0.025f, 0.02f},
-            { "assets/creeper/CreeperZ.obj", L"assets/creeper/creeper.png", PlacementType::Upright, 10, 0.3f, 0.5f, 0.02f },
-            { "assets/woman/obj.obj", L"assets/childrens_chair/childrens_chair_Normal.png", PlacementType::Upright, 12, 0.015f, 0.03f, 0.02f },
-            { "assets/seashell/seashell_rapan-sl-0.obj", L"assets/seashell/rapana_diffuse.png", PlacementType::Flat, 12, 0.05f, 0.2f, -0.2f },
-            { "assets/mouse/W_hlmaus.obj", L"assets/mouse/Feldmaus_Diffuse.png", PlacementType::Flat, 12, 0.001f, 0.003f, 0.02f }
+            ObjectDesc("assets/childrens_chair/childrens_chair.obj", L"assets/childrens_chair/childrens_chair_Albedo.png", PlacementType::Upright, 10, 0.02f, 0.025f, 0.02f, Material::Wood()),
+            ObjectDesc("assets/creeper/CreeperZ.obj", L"assets/creeper/creeper.png", PlacementType::Upright, 10, 0.3f, 0.5f, 0.02f, Material::Organic()),
+            ObjectDesc("assets/woman/obj.obj", L"assets/childrens_chair/childrens_chair_Normal.png", PlacementType::Upright, 12, 0.015f, 0.03f, 0.02f, Material::Metal()),
+            ObjectDesc("assets/seashell/seashell_rapan-sl-0.obj", L"assets/seashell/rapana_diffuse.png", PlacementType::Flat, 12, 0.05f, 0.2f, -0.2f, Material::Ceramic()),
+            ObjectDesc("assets/mouse/W_hlmaus.obj", L"assets/mouse/Feldmaus_Diffuse.png", PlacementType::Flat, 12, 0.001f, 0.003f, 0.02f, Material::Organic())
         };
 
         auto katamari = std::make_unique<KatamariComponent>(

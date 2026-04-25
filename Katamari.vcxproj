@@ -140,6 +140,7 @@
     <ClInclude Include="GameComponent.h" />
     <ClInclude Include="InputDevice.h" />
     <ClInclude Include="KatamariComponent.h" />
+    <ClInclude Include="Material.h" />
     <ClInclude Include="Mesh.h" />
     <ClInclude Include="MeshGenerator.h" />
     <ClInclude Include="ObjLoader.h" />

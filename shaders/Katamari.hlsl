@@ -1,15 +1,23 @@
 cbuffer PerObject : register(b0)
 {
-    float4x4 gModel;
-    float4x4 gView;
-    float4x4 gProjection;
-    float4 gColor;
-    float4 gLightDir;
-    float4 gCameraPos;
+    float4x4 WorldMatrix;
+    float4x4 ViewMatrix;
+    float4x4 ProjectionMatrix;
+    
+    float4 MaterialAmbientColor;
+    float4 MaterialDiffuseColor;
+    float4 MaterialSpecularColor;
+    
+    float MaterialShininess;
+    float3 Padding;
+    
+    float4 SunlightColor;
+    float4 SunlightDirection;
+    float4 CameraPosition;
 };
 
-Texture2D gDiffuseMap : register(t0);
-SamplerState gSampler : register(s0);
+Texture2D DiffuseMap : register(t0);
+SamplerState TextureSampler : register(s0);
 
 struct VS_IN
 {
@@ -28,29 +36,35 @@ struct PS_IN
 
 PS_IN VSMain(VS_IN input)
 {
-    PS_IN o;
-    float4 worldPos = mul(float4(input.pos, 1.0f), gModel);
-    o.posW = worldPos.xyz;
-    o.posH = mul(mul(worldPos, gView), gProjection);
-    o.normal = normalize(mul(input.normal, (float3x3) gModel));
-    o.uv = input.uv;
-    return o;
+    PS_IN output;
+    float4 worldPos = mul(float4(input.pos, 1.0f), WorldMatrix);
+    output.posW = worldPos.xyz;
+    output.posH = mul(mul(worldPos, ViewMatrix), ProjectionMatrix);
+    output.normal = normalize(mul(input.normal, (float3x3) WorldMatrix));
+    output.uv = input.uv;
+    return output;
 }
 
 float4 PSMain(PS_IN input) : SV_Target
 {
-    float3 N = normalize(input.normal);
-    float3 L = normalize(gLightDir.xyz);
-    float3 V = normalize(gCameraPos.xyz - input.posW);
-    float3 H = normalize(L + V);
-    
-    float4 texColor = gDiffuseMap.Sample(gSampler, input.uv);
+    float3 Normal = normalize(input.normal);
+    float3 LightDirection = normalize(SunlightDirection.xyz);
+    float3 ViewDirection = normalize(CameraPosition.xyz - input.posW);
+       
+    float3 ambient = MaterialAmbientColor.rgb * SunlightColor.rgb;
 
-    float ambient = 0.25f;
-    float diffuse = max(dot(N, L), 0.0f);
-    float specular = pow(max(dot(N, H), 0.0f), 32.0f) * 0.3f;
-    
-    float3 finalColor = texColor.rgb * gColor.rgb * (ambient + diffuse) + specular;
+    float diffuseIntensity = max(dot(Normal, LightDirection), 0.0f);
+    float3 diffuse = diffuseIntensity * MaterialDiffuseColor.rgb * SunlightColor.rgb;
 
-    return float4(saturate(finalColor), gColor.a * texColor.a);
+    //Calc reflection vector
+    float3 ReflectionDirection = reflect(-LightDirection, Normal);
+    float specularIntensity = pow(max(dot(ReflectionDirection, ViewDirection), 0.0f), MaterialShininess);
+    float3 specular = specularIntensity * MaterialSpecularColor.rgb * SunlightColor.rgb;
+
+    float4 texColor = DiffuseMap.Sample(TextureSampler, input.uv);
+    
+    //ambient + diffuse is the light contribution, painted by the texture color, then add the specular highlight
+    float3 finalColor = (ambient + diffuse) * texColor.rgb + specular;
+
+    return float4(saturate(finalColor), texColor.a);
 }

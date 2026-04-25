@@ -265,6 +265,8 @@ void KatamariComponent::ScatterObjects()
             obj.worldRadius = obj.scale * mesh->BoundingRadius();
             obj.color = kPalette[ci++ % pal];
 
+            obj.material = desc.material;
+
             float r = RandomFloat(spawnMinDist, sceneRadius - obj.worldRadius);
             float angle = RandomFloat(0.0f, XM_2PI);
 
@@ -385,10 +387,8 @@ void KatamariComponent::CheckAbsorption()
 
         XMVECTOR dirL = XMVector3TransformNormal(dirW, ballOrientInv);
 
-		//store object offset from ball center in local space
-        float surfaceOffset = 1.0f + (obj.worldRadius * 0.5f) / ballRadius;
-        XMVECTOR offsetL = XMVectorScale(XMVector3Normalize(dirL), surfaceOffset);
-        XMStoreFloat3(&obj.localOffset, offsetL);
+        XMVECTOR normalizedDirectionL = XMVector3Normalize(dirL);
+        XMStoreFloat3(&obj.localOffset, normalizedDirectionL);
 
         XMMATRIX objRot = XMLoadFloat4x4(&obj.localRotation);
         XMMATRIX localRot = objRot * ballOrientInv;
@@ -438,27 +438,35 @@ void KatamariComponent::Draw()
 }
 
 void KatamariComponent::SetConstantBuffer(
-    const XMMATRIX& model, const XMMATRIX& view, const XMMATRIX& proj,
-    const XMFLOAT4& color, const XMFLOAT3& camPos)
+    const XMMATRIX& world, const XMMATRIX& view, const XMMATRIX& projection,
+    const Material& material, const XMFLOAT3& camPos)
 {
     D3D11_MAPPED_SUBRESOURCE mapped;
     if (FAILED(game->Context->Map(constantBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
         return;
 
     auto* cb = reinterpret_cast<PerObjectCB*>(mapped.pData);
-    XMStoreFloat4x4(&cb->Model, XMMatrixTranspose(model));
-    XMStoreFloat4x4(&cb->View, XMMatrixTranspose(view));
-    XMStoreFloat4x4(&cb->Projection, XMMatrixTranspose(proj));
-    cb->Color = color;
-    cb->LightDir = XMFLOAT4(0.577f, 0.577f, 0.577f, 0.0f);
-    cb->CameraPos = XMFLOAT4(camPos.x, camPos.y, camPos.z, 1.0f);
+    XMStoreFloat4x4(&cb->WorldMatrix, XMMatrixTranspose(world));
+    XMStoreFloat4x4(&cb->ViewMatrix, XMMatrixTranspose(view));
+    XMStoreFloat4x4(&cb->ProjectionMatrix, XMMatrixTranspose(projection));
+
+
+	//TODO: sun properties
+    cb->SunlightDirection = SunlightDirection;
+    cb->SunlightColor = SunlightColor;
+    cb->CameraPosition = XMFLOAT4(camPos.x, camPos.y, camPos.z, 1.0f);
+
+    cb->MaterialAmbientColor = material.Ambient;
+    cb->MaterialDiffuseColor = material.Diffuse;
+    cb->MaterialSpecularColor = material.Specular;
+    cb->MaterialShininess = material.Shininess;
 
     game->Context->Unmap(constantBuffer.Get(), 0);
 }
 
 void KatamariComponent::DrawBall(const XMMATRIX& v, const XMMATRIX& p, const XMFLOAT3& cam)
 {
-    SetConstantBuffer(BallWorldMatrix(), v, p, ballColor, cam);
+    SetConstantBuffer(BallWorldMatrix(), v, p, ballMaterial, cam);
 
     ID3D11ShaderResourceView* srv = ballMesh->GetTexture();
     game->Context->PSSetShaderResources(0, 1, &srv);
@@ -470,7 +478,7 @@ void KatamariComponent::DrawBall(const XMMATRIX& v, const XMMATRIX& p, const XMF
 void KatamariComponent::DrawFreeObject(const SceneObject& obj,
     const XMMATRIX& v, const XMMATRIX& p, const XMFLOAT3& cam)
 {
-    SetConstantBuffer(FreeObjectWorldMatrix(obj), v, p, obj.color, cam);
+    SetConstantBuffer(FreeObjectWorldMatrix(obj), v, p, obj.material, cam);
 
     ID3D11ShaderResourceView* srv = obj.mesh->GetTexture();
     game->Context->PSSetShaderResources(0, 1, &srv);
@@ -482,7 +490,7 @@ void KatamariComponent::DrawFreeObject(const SceneObject& obj,
 void KatamariComponent::DrawStuckObject(const SceneObject& obj,
     const XMMATRIX& v, const XMMATRIX& p, const XMFLOAT3& cam)
 {
-    SetConstantBuffer(StuckObjectWorldMatrix(obj), v, p, obj.color, cam);
+    SetConstantBuffer(StuckObjectWorldMatrix(obj), v, p, obj.material, cam);
 
     ID3D11ShaderResourceView* srv = obj.mesh->GetTexture();
     game->Context->PSSetShaderResources(0, 1, &srv);
@@ -493,7 +501,7 @@ void KatamariComponent::DrawStuckObject(const SceneObject& obj,
 
 void KatamariComponent::DrawFloor(const XMMATRIX& v, const XMMATRIX& p, const XMFLOAT3& cam)
 {
-    SetConstantBuffer(XMMatrixIdentity(), v, p, floorColor, cam);
+    SetConstantBuffer(XMMatrixIdentity(), v, p, floorMaterial, cam);
 
     ID3D11ShaderResourceView* srv = floorMesh->GetTexture();
     game->Context->PSSetShaderResources(0, 1, &srv);
@@ -521,14 +529,21 @@ XMMATRIX KatamariComponent::FreeObjectWorldMatrix(const SceneObject& obj) const
 XMMATRIX KatamariComponent::StuckObjectWorldMatrix(const SceneObject& obj) const
 {
     XMMATRIX S = XMMatrixScaling(obj.scale, obj.scale, obj.scale);
-    XMMATRIX localRot = XMLoadFloat4x4(&obj.localRotation);
+
+    XMMATRIX localRotation = XMLoadFloat4x4(&obj.localRotation);
+
     XMVECTOR offsetV = XMLoadFloat3(&obj.localOffset);
-    XMMATRIX T_local = XMMatrixTranslationFromVector(offsetV);
 
-    XMMATRIX objLocal = S * localRot * T_local;
-    XMMATRIX ballWorld = BallWorldMatrix();
+    float distanceToSurface = ballRadius + (obj.worldRadius * 0.5f);
 
-    return objLocal * ballWorld;
+    XMVECTOR finalLocalPosition = offsetV * distanceToSurface;
+    XMMATRIX T_surface = XMMatrixTranslationFromVector(finalLocalPosition);
+
+    XMMATRIX ballRotation = XMLoadFloat4x4(&ballOrientMtx);
+    XMMATRIX ballTranslation = XMMatrixTranslation(ballPos.x, ballPos.y, ballPos.z);
+
+
+    return S * localRotation * T_surface * ballRotation * ballTranslation;
 }
 
 void KatamariComponent::DestroyResources()
