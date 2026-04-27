@@ -55,6 +55,8 @@ public:
     /// Called by DisplayWin32::StaticWndProc — handles WM_INPUT (Raw Input API).
     static LRESULT CALLBACK MessageHandler(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
 
+    void RestoreTargets();
+
 private:
     std::vector<std::unique_ptr<GameComponent>> Components;
     bool isExiting = false;
@@ -69,7 +71,6 @@ private:
     void RegisterRawInput();   // registers keyboard + mouse as Raw Input devices
     void PrepareResources();
     void CreateBackBuffer();
-    void RestoreTargets();
     void PrepareFrame();
     void UpdateInternal(float dt);
     void Draw();

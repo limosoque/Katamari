@@ -6,6 +6,7 @@
 #include "MeshGenerator.h"
 #include "Material.h"
 #include "DisplayWin32.h"
+#include "ShadowMap.h"
 
 #include <d3d11.h>
 #include <d3dcompiler.h>
@@ -34,6 +35,9 @@ struct alignas(16) PerObjectCB
     DirectX::XMFLOAT4 SunlightColor;
     DirectX::XMFLOAT4 SunlightDirection;
     DirectX::XMFLOAT4 CameraPosition;
+
+    DirectX::XMFLOAT4X4 LightViewProj[kCascadeCount];
+    DirectX::XMFLOAT4   CascadeSplits;
 };
 
 struct SceneObject
@@ -134,6 +138,15 @@ private:
     //Stats
     int absorbedCount = 0;
 
+    // Shadow
+    ShadowData shadow;
+    Microsoft::WRL::ComPtr<ID3D11VertexShader> shadowVertexShader;
+    Microsoft::WRL::ComPtr<ID3D11GeometryShader> shadowGeometryShader;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> shadowConstantBuffer;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> shadowCascadeBuffer;
+    Microsoft::WRL::ComPtr<ID3D11RasterizerState> shadowRastState;
+    Microsoft::WRL::ComPtr<ID3D11SamplerState> shadowSamplerState;
+
     //D3D
     Microsoft::WRL::ComPtr<ID3D11VertexShader> vertexShader;
     Microsoft::WRL::ComPtr<ID3D11PixelShader> pixelShader;
@@ -146,6 +159,14 @@ private:
     Microsoft::WRL::ComPtr<ID3DBlob> vsBytecode;
 
     std::mt19937 rng{ std::random_device{}() };
+
+    void CompileShadowShader();
+    void CreateShadowConstantBuffer();
+    void CreateShadowCascadeBuffer();
+    void CreateShadowRasterizerState();
+    void CreateShadowSamplerState();
+    void RenderShadowPass();
+    void DrawSceneForShadow();
 
     void CompileShaders();
     void CreateInputLayout();

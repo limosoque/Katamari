@@ -3,6 +3,7 @@
 #include "KatamariComponent.h"
 #include "Game.h"
 #include "InputDevice.h"
+#include "ShadowMap.h"
 #include <stdexcept>
 #include <iostream>
 #include <algorithm>
@@ -43,6 +44,13 @@ void KatamariComponent::Initialize()
     CreateDepthStencilState();
     CreateBlendState();
     CreateSamplerState();
+
+    CompileShadowShader();
+    CreateShadowConstantBuffer();
+    CreateShadowCascadeBuffer();
+    CreateShadowRasterizerState();
+    CreateShadowSamplerState();
+    shadow.Create(game->Device.Get());
 
     BuildBallMesh();
     BuildObjectMeshes();
@@ -408,6 +416,34 @@ void KatamariComponent::Draw()
 {
     auto* ctx = game->Context.Get();
 
+    // ── Update cascade matrices (needs current camera state) ─────────────────
+    {
+        XMVECTOR lightDir = XMLoadFloat4(&SunlightDirection);
+        lightDir = XMVector3Normalize(lightDir);
+        XMMATRIX view = camera.GetView(ballPos);
+        XMMATRIX proj = camera.GetProjection();
+        shadow.UpdateCascades(lightDir, view, proj, camera.NearPlane);
+    }
+
+    // ── Shadow pass: render depth from sun into each cascade map ─────────────
+    RenderShadowPass();
+
+    // ── Restore main render target (shadow pass left it unbound) ─────────────
+    game->RestoreTargets();
+
+    D3D11_VIEWPORT mainVp = {};
+    mainVp.Width = static_cast<float>(game->Display->ClientWidth);
+    mainVp.Height = static_cast<float>(game->Display->ClientHeight);
+    mainVp.MinDepth = 0.0f;
+    mainVp.MaxDepth = 1.0f;
+    ctx->RSSetViewports(1, &mainVp);
+
+    // ── Bind shadow Texture2DArray SRV to slot t1 ────────────────────────────
+        // One SRV covers all cascade slices (teacher's Texture2DArray approach).
+    ID3D11ShaderResourceView* shadowSRV = shadow.srv.Get();
+    ctx->PSSetShaderResources(1, 1, &shadowSRV);
+    ctx->PSSetSamplers(1, 1, shadowSamplerState.GetAddressOf());
+
     ctx->OMSetDepthStencilState(depthState.Get(), 0);
     float blendFactor[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
     ctx->OMSetBlendState(blendState.Get(), blendFactor, 0xFFFFFFFF);
@@ -451,7 +487,6 @@ void KatamariComponent::SetConstantBuffer(
     XMStoreFloat4x4(&cb->ProjectionMatrix, XMMatrixTranspose(projection));
 
 
-	//TODO: sun properties
     cb->SunlightDirection = SunlightDirection;
     cb->SunlightColor = SunlightColor;
     cb->CameraPosition = XMFLOAT4(camPos.x, camPos.y, camPos.z, 1.0f);
@@ -460,6 +495,13 @@ void KatamariComponent::SetConstantBuffer(
     cb->MaterialDiffuseColor = material.Diffuse;
     cb->MaterialSpecularColor = material.Specular;
     cb->MaterialShininess = material.Shininess;
+
+    // Upload CSM matrices and split depths.
+    // shadow.lightViewProj[i] is already transposed (stored row-major for HLSL mul()).
+    for (int i = 0; i < kCascadeCount; ++i)
+        cb->LightViewProj[i] = shadow.lightViewProj[i];
+    cb->CascadeSplits = XMFLOAT4(
+        shadow.splitDepths[0], shadow.splitDepths[1], shadow.splitDepths[2], 0.0f);
 
     game->Context->Unmap(constantBuffer.Get(), 0);
 }
@@ -546,8 +588,237 @@ XMMATRIX KatamariComponent::StuckObjectWorldMatrix(const SceneObject& obj) const
     return S * localRotation * T_surface * ballRotation * ballTranslation;
 }
 
+// ─── Shadow: compile depth-only vertex shader ────────────────────────────────
+
+void KatamariComponent::CompileShadowShader()
+{
+	//TODO: param shadowPass shader path
+    std::wstring shadowShaderPath = L"shaders/ShadowPass.hlsl";
+    ComPtr<ID3DBlob> blob, errors;
+    UINT flags = D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+
+    // ── Vertex shader ─────────────────────────────────────────────────────────
+    HRESULT hr = D3DCompileFromFile(
+        shadowShaderPath.c_str(), nullptr, nullptr,
+        "VShadow", "vs_5_0", flags, 0,
+        blob.GetAddressOf(), errors.GetAddressOf());
+    if (FAILED(hr))
+    {
+        if (errors) std::cerr << "[ShadowVS] " << (char*)errors->GetBufferPointer() << '\n';
+        throw std::runtime_error("Shadow vertex shader compilation failed.");
+    }
+    hr = game->Device->CreateVertexShader(
+        blob->GetBufferPointer(), blob->GetBufferSize(),
+        nullptr, shadowVertexShader.GetAddressOf());
+    if (FAILED(hr)) throw std::runtime_error("CreateVertexShader (shadow) failed.");
+
+    // ── Geometry shader (instanced — fills all cascade slices in one draw) ────
+    ComPtr<ID3DBlob> gsBlob;
+    hr = D3DCompileFromFile(
+        shadowShaderPath.c_str(), nullptr, nullptr,
+        "GShadow", "gs_5_0", flags, 0,
+        gsBlob.GetAddressOf(), errors.GetAddressOf());
+    if (FAILED(hr))
+    {
+        if (errors) std::cerr << "[ShadowGS] " << (char*)errors->GetBufferPointer() << '\n';
+        throw std::runtime_error("Shadow geometry shader compilation failed.");
+    }
+    hr = game->Device->CreateGeometryShader(
+        gsBlob->GetBufferPointer(), gsBlob->GetBufferSize(),
+        nullptr, shadowGeometryShader.GetAddressOf());
+    if (FAILED(hr)) throw std::runtime_error("CreateGeometryShader (shadow) failed.");
+}
+
+
+// ─── Shadow: constant buffer (WorldMatrix + LightViewProj per cascade) ────────
+//
+// Layout must match ShadowPassCB in ShadowPass.hlsl.
+
+struct ShadowPassCB
+{
+    DirectX::XMFLOAT4X4 WorldMatrix;   // only World needed; GS handles projection
+};
+
+void KatamariComponent::CreateShadowConstantBuffer()
+{
+    D3D11_BUFFER_DESC desc = {};
+    desc.Usage = D3D11_USAGE_DYNAMIC;
+    desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    desc.ByteWidth = sizeof(ShadowPassCB);
+    if (FAILED(game->Device->CreateBuffer(&desc, nullptr, shadowConstantBuffer.GetAddressOf())))
+        throw std::runtime_error("CreateBuffer (shadow CB) failed.");
+}
+
+// b1: all cascade LightViewProj matrices + split depths (updated once per frame).
+struct ShadowCascadeCB
+{
+    DirectX::XMFLOAT4X4 LightViewProj[kCascadeCount];
+    DirectX::XMFLOAT4   CascadeSplits;
+};
+
+void KatamariComponent::CreateShadowCascadeBuffer()
+{
+    D3D11_BUFFER_DESC desc = {};
+    desc.Usage = D3D11_USAGE_DYNAMIC;
+    desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    desc.ByteWidth = sizeof(ShadowCascadeCB);
+    if (FAILED(game->Device->CreateBuffer(&desc, nullptr, shadowCascadeBuffer.GetAddressOf())))
+        throw std::runtime_error("CreateBuffer (shadow cascade CB) failed.");
+}
+
+// ─── Shadow rasterizer: enable depth bias to fight shadow acne ───────────────
+//
+// Shadow acne happens because a surface compares its own depth against what was
+// stored in the shadow map. Floating-point imprecision makes the surface
+// slightly shadow itself.
+//
+// DepthBias adds a constant offset to all stored depths (shifts the shadow map
+// values slightly away from the camera).
+// SlopeScaledDepthBias adds extra bias proportional to the polygon slope
+// relative to the light — steeper slopes need more bias.
+
+void KatamariComponent::CreateShadowRasterizerState()
+{
+    CD3D11_RASTERIZER_DESC desc(D3D11_DEFAULT);
+    // Teacher specifies CULL_FRONT for shadow pass.
+// Culling front faces means only back faces write depth.
+// This neatly avoids self-shadowing (shadow acne) on front surfaces
+// because the depth stored is that of the *back* face,
+// which is always deeper than the front face being lit.
+    desc.CullMode = D3D11_CULL_FRONT;
+    desc.DepthBias = 5000;     // constant bias in depth units
+    desc.SlopeScaledDepthBias = 2.0f;    // slope-proportional bias
+    desc.DepthBiasClamp = 0.01f;   // cap to avoid over-biasing near silhouettes
+    if (FAILED(game->Device->CreateRasterizerState(&desc, shadowRastState.GetAddressOf())))
+        throw std::runtime_error("CreateRasterizerState (shadow) failed.");
+}
+
+// ─── Shadow sampler: point clamp for manual PCF in the shader ────────────────
+//
+// We use a plain point sampler (no hardware PCF) so we have full control over
+// the kernel in HLSL. Clamp addressing prevents wrapping at shadow map edges.
+
+void KatamariComponent::CreateShadowSamplerState()
+{
+    D3D11_SAMPLER_DESC desc = {};
+    desc.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
+    desc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
+    desc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+    desc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+    desc.MinLOD = 0;
+    desc.MaxLOD = D3D11_FLOAT32_MAX;
+    if (FAILED(game->Device->CreateSamplerState(&desc, shadowSamplerState.GetAddressOf())))
+        throw std::runtime_error("CreateSamplerState (shadow) failed.");
+}
+
+// ─── Shadow pass: render entire scene into each cascade depth map ─────────────
+//
+// Pipeline state for the shadow pass:
+//   - No render target (nullptr) — only depth stencil is bound.
+//   - Shadow rasterizer state (with depth bias).
+//   - Shadow vertex shader only — no pixel shader needed.
+//   - Shadow constant buffer at slot 0.
+
+void KatamariComponent::RenderShadowPass()
+{
+    auto* ctx = game->Context.Get();
+
+    // ── Upload cascade buffer (b1): all LightViewProj + split depths ──────────
+    // Done once per frame before drawing — GS reads it for all instances.
+    {
+        D3D11_MAPPED_SUBRESOURCE mapped;
+        if (SUCCEEDED(ctx->Map(shadowCascadeBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
+        {
+            auto* cb = reinterpret_cast<ShadowCascadeCB*>(mapped.pData);
+            for (int i = 0; i < kCascadeCount; ++i)
+                cb->LightViewProj[i] = shadow.lightViewProj[i];
+            cb->CascadeSplits = XMFLOAT4(
+                shadow.splitDepths[0], shadow.splitDepths[1], shadow.splitDepths[2], 0.0f);
+            ctx->Unmap(shadowCascadeBuffer.Get(), 0);
+        }
+    }
+
+    // ── Pipeline state for the shadow pass ────────────────────────────────────
+    D3D11_VIEWPORT vp = {};
+    vp.Width = static_cast<float>(kShadowMapSize);
+    vp.Height = static_cast<float>(kShadowMapSize);
+    vp.MinDepth = 0.0f;
+    vp.MaxDepth = 1.0f;
+    ctx->RSSetViewports(1, &vp);
+
+    ctx->RSSetState(shadowRastState.Get());
+    ctx->IASetInputLayout(inputLayout.Get());
+
+    ctx->VSSetShader(shadowVertexShader.Get(), nullptr, 0);
+    ctx->GSSetShader(shadowGeometryShader.Get(), nullptr, 0);   // instanced GS
+    ctx->PSSetShader(nullptr, nullptr, 0);                      // depth only
+
+    // b0 = per-draw World matrix, b1 = cascade data for GS
+    ctx->VSSetConstantBuffers(0, 1, shadowConstantBuffer.GetAddressOf());
+    ctx->GSSetConstantBuffers(1, 1, shadowCascadeBuffer.GetAddressOf());
+
+    // ── Clear the entire array DSV, bind it once ──────────────────────────────
+    // Teacher uses one DSV covering all array slices — the GS routes triangles
+    // into the correct slice via SV_RenderTargetArrayIndex.
+    ctx->ClearDepthStencilView(shadow.dsv.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
+    ID3D11RenderTargetView* nullRTV = nullptr;
+    ctx->OMSetRenderTargets(0, &nullRTV, shadow.dsv.Get());
+
+    // ── One draw call fills all cascade slices (GS instancing does the rest) ──
+    DrawSceneForShadow();
+
+    // Unbind DSV before using the SRV in the lighting pass.
+    ctx->OMSetRenderTargets(0, nullptr, nullptr);
+    ctx->GSSetShader(nullptr, nullptr, 0);   // clear GS for main pass
+}
+
+// ─── Draw all visible geometry for the shadow pass ────────────────────────────
+//
+// We only need position → just upload World + LightViewProj and draw.
+
+// DrawSceneForShadow — no cascade parameter needed.
+// The GS reads all LightViewProj from shadowCascadeBuffer (b1)
+// and routes each triangle instance to the correct array slice.
+void KatamariComponent::DrawSceneForShadow()
+{
+    auto* ctx = game->Context.Get();
+
+    // Helper: upload World matrix to b0 and draw.
+    auto drawMesh = [&](const XMMATRIX& worldMtx, Mesh* mesh)
+        {
+            D3D11_MAPPED_SUBRESOURCE mapped;
+            if (FAILED(ctx->Map(shadowConstantBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
+                return;
+
+            ShadowPassCB* cb = reinterpret_cast<ShadowPassCB*>(mapped.pData);
+            XMStoreFloat4x4(&cb->WorldMatrix, XMMatrixTranspose(worldMtx));
+            ctx->Unmap(shadowConstantBuffer.Get(), 0);
+
+            mesh->Bind(ctx);
+            mesh->Draw(ctx);
+        };
+
+    drawMesh(BallWorldMatrix(), ballMesh.get());
+    drawMesh(XMMatrixIdentity(), floorMesh.get());
+
+    for (const auto& obj : objects)
+    {
+        XMMATRIX world = obj.absorbed
+            ? StuckObjectWorldMatrix(obj)
+            : FreeObjectWorldMatrix(obj);
+        drawMesh(world, obj.mesh.get());
+    }
+}
 void KatamariComponent::DestroyResources()
 {
+    shadowRastState.Reset();
+    shadowCascadeBuffer.Reset();
+    shadowConstantBuffer.Reset();
+    shadowGeometryShader.Reset();
+    shadowVertexShader.Reset();
+    shadowSamplerState.Reset();
     rastState.Reset();
     depthState.Reset();
     blendState.Reset();
