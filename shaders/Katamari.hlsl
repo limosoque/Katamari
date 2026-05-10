@@ -64,7 +64,7 @@ float SampleShadowPCF(int cascadeIdx, float2 shadowUV, float fragmentDepth)
     float shadow = 0.0f;
     float texelSize = 1.0f / 2048.0f; // TODO: must match kShadowMapSize
 
-    // 3×3 kernel
+    //3×3 kernel
     [unroll]
     for (int dy = -1; dy <= 1; ++dy)
     {
@@ -75,59 +75,65 @@ float SampleShadowPCF(int cascadeIdx, float2 shadowUV, float fragmentDepth)
             float3 uvw = float3(shadowUV + offset, (float) cascadeIdx);
             float storedDepth = ShadowMapArray.Sample(ShadowSampler, uvw).r;
 
-            // Compare fragment depth against stored depth.
-            // A small bias (0.001) prevents shadow acne — self-shadowing due to
-            // floating-point precision.  The slope-scaled bias in the rasterizer
-            // state handles most of it; this is a safety margin.
-            shadow += (fragmentDepth - 0.001f < storedDepth) ? 1.0f : 0.0f;
+            shadow += (fragmentDepth + 0.001f < storedDepth) ? 1.0f : 0.0f; //lil bias to prevent acne
         }
     }
 
-    return shadow / 9.0f; // normalise: 1 = fully lit, 0 = fully in shadow
+    return shadow / 9.0f; //normalise, where 1 is fully lit
 }
 
 float4 ComputeShadowFactor(float3 worldPos, float viewDepth)
 {
-    // ── 1. Select cascade index ───────────────────────────────────────────────
-    int cascadeIndex = 2; // default: furthest cascade
+    //select cascade index
+    int cascadeIndex = 2;
     if (viewDepth < CascadeSplits.x)
-        cascadeIndex = 0;
+    {
+            cascadeIndex = 0;
+    }
     else if (viewDepth < CascadeSplits.y)
+    {
         cascadeIndex = 1;
+    }
     
+    //debug cascades
     float3 debugColor = float3(1, 1, 1);
     if (cascadeIndex == 0)
-        debugColor = float3(1.0, 0.5, 0.5); // Первый каскад — Красный
+    {
+        debugColor = float3(1.0, 0.5, 0.5); //red
+    }
     else if (cascadeIndex == 1)
-        debugColor = float3(0.5, 1.0, 0.5); // Второй — Зеленый
+    {
+        debugColor = float3(0.5, 1.0, 0.5); //green
+    }
     else
-        debugColor = float3(0.5, 0.5, 1.0); // Третий — Синий
+    {
+        debugColor = float3(0.5, 0.5, 1.0); //
+    }
 
-    // ── 2. Project world position into light clip space ───────────────────────
+    //project world position into light clip space
     float4x4 lvp = LightViewProj[cascadeIndex];
     float4 lightClip = mul(float4(worldPos, 1.0f), lvp);
 
-    // Perspective divide (for ortho proj w==1, but good habit)
+    //perspective divide
     float3 lightNDC = lightClip.xyz / lightClip.w;
 
-    // ── 3. Convert NDC → shadow map UV ────────────────────────────────────────
-    // NDC x ∈ [-1,+1] → UV x ∈ [0,1]
-    // NDC y ∈ [-1,+1] → UV y ∈ [1,0]  (flipped)
+    //convert normalized coords to sh uv
+    // NDC x - [-1,+1] = UV x - [0,1]
+    // NDC y - [-1,+1] = UV y - [1,0]
     float2 shadowUV;
     shadowUV.x = lightNDC.x * 0.5f + 0.5f;
     shadowUV.y = -lightNDC.y * 0.5f + 0.5f;
 
-    // Fragment depth in light space (already [0,1] for D3D ortho)
+    //fragment depth in light space
     float fragmentDepth = lightNDC.z;
 
-    // ── 4. Reject fragments outside the shadow map ────────────────────────────
-    // If the UV is outside [0,1] or depth is out of range, assume lit.
+    //reject fragments outside the shadow map
     if (shadowUV.x < 0.0f || shadowUV.x > 1.0f ||
         shadowUV.y < 0.0f || shadowUV.y > 1.0f ||
         fragmentDepth < 0.0f || fragmentDepth > 1.0f)
         return 1.0f;
 
-    // ── 5. PCF sample from the correct cascade ────────────────────────────────
+    //PCF
     float shadow = SampleShadowPCF(cascadeIndex, shadowUV, fragmentDepth);
 
     return float4(debugColor, shadow);
@@ -152,17 +158,13 @@ float4 PSMain(PS_IN input) : SV_Target
     float specularIntensity = pow(max(dot(ReflectionDirection, ViewDirection), 0.0f), MaterialShininess);
     float3 specular = specularIntensity * MaterialSpecularColor.rgb * SunlightColor.rgb;
     
-    //float shadow = ComputeShadowFactor(input.posW, input.depth);
-    //float viewDepth = input.posH.w;
     float4 shadowData = ComputeShadowFactor(input.posW, input.depth);
     
     float3 debugTint = shadowData.xyz;
     float shadowAmt = shadowData.w;
     
-    //ambient + diffuse is the light contribution, painted by the texture color, then add the specular highlight
-    //float3 finalColor = (ambient + shadow * (diffuse + specular)) * texColor.rgb;
     float3 finalColor = (ambient + shadowAmt * (diffuse + specular)) * texColor.rgb;
 
-    return float4(saturate(finalColor * debugTint), texColor.a);
-    //return float4(saturate(finalColor), texColor.a);
+    //return float4(saturate(finalColor * debugTint), texColor.a);
+    return float4(saturate(finalColor), texColor.a);
 }

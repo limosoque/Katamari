@@ -102,6 +102,7 @@ public:
 private:
     std::vector<ObjectDesc> objectDescs;
     std::wstring shaderPath;
+	std::wstring shadowShaderPath = L"shaders/ShadowPass.hlsl";
     float sceneRadius;
 
     //Sun

@@ -4,8 +4,14 @@
 #include <iostream>
 #include "Material.h"
 
+#include <ShellScalingApi.h>
+#pragma comment(lib, "Shcore.lib")
+
 int main()
 {
+    SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE);
+
+
     try
     {
         Game game(L"Katamari", 1920, 1080);
