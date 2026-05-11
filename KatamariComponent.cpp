@@ -24,12 +24,14 @@ KatamariComponent::KatamariComponent(
     std::wstring ballTex,
     std::wstring floorTex,
     std::wstring shaderPath,
+    ProjectileDesc projectileDescription,
     float sceneRad)
     : GameComponent(owner),
     objectDescs(std::move(descs)), 
     ballTexPath(std::move(ballTex)),
     floorTexPath(std::move(floorTex)),
     shaderPath(std::move(shaderPath)),
+	projectileDescription(std::move(projectileDescription)),
     sceneRadius(sceneRad)
 {
     XMStoreFloat4x4(&ballOrientMtx, XMMatrixIdentity());
@@ -55,6 +57,8 @@ void KatamariComponent::Initialize()
     BuildBallMesh();
     BuildObjectMeshes();
     BuildFloorMesh();
+    BuildProjectileMesh();
+
     ScatterObjects();
 
     camera.Pitch = 0.4f;
@@ -69,7 +73,7 @@ void KatamariComponent::CompileShaders()
     UINT flags = D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
 
     HRESULT hr = D3DCompileFromFile(
-        shaderPath.c_str(), nullptr, nullptr,
+        shaderPath.c_str(), nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE,
         "VSMain", "vs_5_0", flags, 0,
         vsBytecode.GetAddressOf(), errors.GetAddressOf());
     if (FAILED(hr))
@@ -84,7 +88,7 @@ void KatamariComponent::CompileShaders()
 
     ComPtr<ID3DBlob> psBytecode;
     hr = D3DCompileFromFile(
-        shaderPath.c_str(), nullptr, nullptr,
+        shaderPath.c_str(), nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE,
         "PSMain", "ps_5_0", flags, 0,
         psBytecode.GetAddressOf(), errors.GetAddressOf());
     if (FAILED(hr))
@@ -192,6 +196,15 @@ void KatamariComponent::BuildObjectMeshes()
         mesh->LoadTexture(game->Device.Get(), desc.texPath);
         meshPool.push_back(std::move(mesh));
     }
+}
+
+void KatamariComponent::BuildProjectileMesh()
+{
+	MeshData md = MeshGenerator::CreateSphere(1.f, 16, 16);
+	projectileMesh = std::make_shared<Mesh>();
+	projectileMesh->Upload(game, md);
+
+	projectileMesh->LoadTexture(game->Device.Get(), projectileDescription.texturePath);
 }
 
 void KatamariComponent::BuildFloorMesh()
@@ -314,11 +327,9 @@ void KatamariComponent::Update(float dt)
 {
     UpdateBallPhysics(dt);
     CheckAbsorption();
-
-    camera.Yaw = cameraYaw;
-    camera.Distance = ballRadius * 8.0f;
-    camera.AspectRatio = static_cast<float>(game->Display->ClientWidth) /
-        static_cast<float>(game->Display->ClientHeight);
+	ShootProjectile(dt);
+	UpdateProjectiles(dt);
+    UpdateCamera();
 }
 
 void KatamariComponent::UpdateBallPhysics(float dt)
@@ -342,6 +353,8 @@ void KatamariComponent::UpdateBallPhysics(float dt)
     float moveLen = XMVectorGetX(XMVector3Length(move));
     if (moveLen > 0.001f)
     {
+		lastMoveDirection = XMVector3Normalize(move);
+
         XMVECTOR moveDelta = XMVectorScale(move, speed * dt / moveLen);
         posV = XMVectorAdd(posV, moveDelta);
 
@@ -355,16 +368,16 @@ void KatamariComponent::UpdateBallPhysics(float dt)
         XMStoreFloat4x4(&ballOrientMtx, prev * rot);
     }
 
-    //border moving 
-    float px = XMVectorGetX(posV);
-    float pz = XMVectorGetZ(posV);
-    float lim = sceneRadius - ballRadius;
-  
-    px = Clamp(px, -lim, lim);
-    pz = Clamp(pz, -lim, lim);
-    float py = GetTerrainHeight(px, pz) + ballRadius;
+//border moving 
+float px = XMVectorGetX(posV);
+float pz = XMVectorGetZ(posV);
+float lim = sceneRadius - ballRadius;
 
-    ballPos = XMFLOAT3(px, py, pz);
+px = Clamp(px, -lim, lim);
+pz = Clamp(pz, -lim, lim);
+float py = GetTerrainHeight(px, pz) + ballRadius;
+
+ballPos = XMFLOAT3(px, py, pz);
 }
 
 void KatamariComponent::CheckAbsorption()
@@ -373,7 +386,7 @@ void KatamariComponent::CheckAbsorption()
     {
         if (obj.absorbed) continue;
 
-		//Check object is smaller than ball
+        //Check object is smaller than ball
         if (obj.worldRadius >= ballRadius) continue;
 
         float dx = obj.position.x - ballPos.x;
@@ -410,6 +423,84 @@ void KatamariComponent::CheckAbsorption()
         std::cout << "[Katamari] Absorbed #" << absorbedCount
             << " ballRadius = " << ballRadius << '\n';
     }
+}
+
+void KatamariComponent::ShootProjectile(float dt)
+{
+    currentFireCooldown -= dt;
+    if (game->Input->IsKeyDown(VK_SPACE) && currentFireCooldown <= 0.f)
+    {
+        LightProjectile proj;
+        proj.startPosition = ballPos;
+        proj.currentPosition = ballPos;
+        XMStoreFloat3(&proj.direction, lastMoveDirection);
+
+        activeProjectiles.push_back(proj);
+        currentFireCooldown = projectileDescription.fireCooldown;
+
+        if (activeProjectiles.size() > (size_t)projectileDescription.maxProjectiles)
+        {
+            activeProjectiles.erase(activeProjectiles.begin());
+        }
+    }
+}
+
+void KatamariComponent::UpdateProjectiles(float dt)
+{
+    for (auto it = activeProjectiles.begin(); it != activeProjectiles.end(); )
+    {
+        it->age += dt;
+        it->distanceTraveled += projectileDescription.speed * dt;
+
+        //move forward
+        XMVECTOR start = XMLoadFloat3(&it->startPosition);
+        XMVECTOR direction = XMLoadFloat3(&it->direction);
+        XMVECTOR newPosition = start + direction * it->distanceTraveled;
+
+        XMFLOAT3 currentPosition;
+        XMStoreFloat3(&currentPosition, newPosition);
+
+        //Y movement with terrain following
+        float groundY = GetTerrainHeight(currentPosition.x, currentPosition.z);
+        currentPosition.y = groundY + projectileDescription.yBaseOffset +
+            std::sin(it->distanceTraveled * projectileDescription.frequency) * projectileDescription.amplitude;
+
+        it->currentPosition = currentPosition;
+
+		//remove if lifetime exceeded
+        if (it->age > projectileDescription.lifetime)
+        {
+			it = activeProjectiles.erase(it);
+        
+        }
+        else
+        {
+            ++it;
+        }
+    }
+}
+
+void KatamariComponent::DrawProjectile(ID3D11DeviceContext* context, const LightProjectile& projectile, const XMMATRIX& view, const XMMATRIX& projection, const XMFLOAT3& camPos)
+{
+    XMMATRIX mScale = XMMatrixScaling(projectileDescription.visualScale, projectileDescription.visualScale, projectileDescription.visualScale);
+	XMMATRIX mTrans = XMMatrixTranslation(projectile.currentPosition.x, projectile.currentPosition.y, projectile.currentPosition.z);
+	XMMATRIX mWorld = mScale * mTrans;
+
+	SetConstantBuffer(mWorld, view, projection, projectileDescription.material, camPos);
+
+	ID3D11ShaderResourceView* tex = projectileMesh->GetTexture();
+	context->PSSetShaderResources(0, 1, &tex);
+
+    projectileMesh->Bind(context);
+    projectileMesh->Draw(context);
+}
+
+void KatamariComponent::UpdateCamera()
+{
+    camera.Yaw = cameraYaw;
+    camera.Distance = ballRadius * 8.0f;
+    camera.AspectRatio = static_cast<float>(game->Display->ClientWidth) /
+        static_cast<float>(game->Display->ClientHeight);
 }
 
 void KatamariComponent::Draw()
@@ -452,21 +543,33 @@ void KatamariComponent::Draw()
     ctx->VSSetConstantBuffers(0, 1, constantBuffer.GetAddressOf());
     ctx->PSSetConstantBuffers(0, 1, constantBuffer.GetAddressOf());
 
-    //view = camera.GetView(ballPos);
-    //proj = camera.GetProjection();
     XMFLOAT3 camPos = camera.GetEyePosition(ballPos);
 
     DrawFloor(view, proj, camPos);
 
     for (const auto& obj : objects)
+    {
         if (!obj.absorbed)
+        {
             DrawFreeObject(obj, view, proj, camPos);
+        }
+    }
 
     DrawBall(view, proj, camPos);
 
-    for (const auto& obj : objects)
+    //draw flying projectiles
+    for (const auto& projectile : activeProjectiles)
+    {
+        DrawProjectile(ctx, projectile, view, proj, camPos);
+    }
+
+    for (const auto& obj : objects) 
+    {
         if (obj.absorbed)
+        {
             DrawStuckObject(obj, view, proj, camPos);
+        }
+    }
 }
 
 void KatamariComponent::SetConstantBuffer(
@@ -491,6 +594,35 @@ void KatamariComponent::SetConstantBuffer(
     cb->MaterialDiffuseColor = material.Diffuse;
     cb->MaterialSpecularColor = material.Specular;
     cb->MaterialShininess = material.Shininess;
+
+    //Sun
+    cb->Lights[0].Type = 0;
+    cb->Lights[0].Color = SunlightColor;
+    cb->Lights[0].Position = SunlightDirection;
+    cb->Lights[0].Range = 0.f;
+
+    //projectiles
+    int activeProjectileCount = (int)activeProjectiles.size();
+    for (int i = 0; i < activeProjectileCount; ++i) 
+    {
+        int index = i + 1;
+        cb->Lights[index].Type = 1;
+        cb->Lights[index].Color = XMFLOAT4(
+            projectileDescription.color.x,
+            projectileDescription.color.y,
+            projectileDescription.color.z,
+            projectileDescription.lightIntensity
+        );
+        cb->Lights[index].Position = XMFLOAT4(
+            activeProjectiles[i].currentPosition.x,
+            activeProjectiles[i].currentPosition.y,
+            activeProjectiles[i].currentPosition.z,
+            1.f
+        );
+        cb->Lights[index].Range = projectileDescription.lightRange;
+    }
+    
+    cb->ActiveLightCount = 1 + activeProjectileCount;
 
 	//upload cascades and split depths for shadow mapping
     for (int i = 0; i < kCascadeCount; ++i)
@@ -590,7 +722,7 @@ void KatamariComponent::CompileShadowShader()
     UINT flags = D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
 
     HRESULT hr = D3DCompileFromFile(
-        shadowShaderPath.c_str(), nullptr, nullptr,
+        shadowShaderPath.c_str(), nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE,
         "VShadow", "vs_5_0", flags, 0,
         blob.GetAddressOf(), errors.GetAddressOf());
     if (FAILED(hr))
@@ -605,7 +737,7 @@ void KatamariComponent::CompileShadowShader()
 
     ComPtr<ID3DBlob> gsBlob;
     hr = D3DCompileFromFile(
-        shadowShaderPath.c_str(), nullptr, nullptr,
+        shadowShaderPath.c_str(), nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE,
         "GShadow", "gs_5_0", flags, 0,
         gsBlob.GetAddressOf(), errors.GetAddressOf());
     if (FAILED(hr))

@@ -1,3 +1,5 @@
+#include "../LightSource.h"
+
 cbuffer PerObject : register(b0)
 {
     float4x4 WorldMatrix;
@@ -15,15 +17,18 @@ cbuffer PerObject : register(b0)
     float4 SunlightDirection;
     float4 CameraPosition;
     
+    int ActiveLightCount;
+    float3 PaddingLights;
+
+    LightSource Lights[MAX_LIGHTS];
+    
     float4x4 LightViewProj[3];
     float4 CascadeSplits;
 };
 
 Texture2D DiffuseMap : register(t0);
 SamplerState TextureSampler : register(s0);
-
 Texture2DArray ShadowMapArray : register(t1);
-
 SamplerState ShadowSampler : register(s1);
 
 struct VS_IN
@@ -111,8 +116,7 @@ float4 ComputeShadowFactor(float3 worldPos, float viewDepth)
     }
 
     //project world position into light clip space
-    float4x4 lvp = LightViewProj[cascadeIndex];
-    float4 lightClip = mul(float4(worldPos, 1.0f), lvp);
+    float4 lightClip = mul(float4(worldPos, 1.0f), LightViewProj[cascadeIndex]);
 
     //perspective divide
     float3 lightNDC = lightClip.xyz / lightClip.w;
@@ -131,7 +135,9 @@ float4 ComputeShadowFactor(float3 worldPos, float viewDepth)
     if (shadowUV.x < 0.0f || shadowUV.x > 1.0f ||
         shadowUV.y < 0.0f || shadowUV.y > 1.0f ||
         fragmentDepth < 0.0f || fragmentDepth > 1.0f)
+    {
         return 1.0f;
+    }
 
     //PCF
     float shadow = SampleShadowPCF(cascadeIndex, shadowUV, fragmentDepth);
@@ -139,6 +145,52 @@ float4 ComputeShadowFactor(float3 worldPos, float viewDepth)
     return float4(debugColor, shadow);
 }
 
+float3 ComputeLight(LightSource light, 
+                    float3 pixelWorldPos, 
+                    float3 pixelNormal, 
+                    float3 vectorToCamera, 
+                    float materialShininess, 
+                    float3 materialSpecularColor)
+{
+    float3 directionToLight;
+    float distanceAttenuation = 1.f;
+    
+    //directional
+    if (light.Type == 0)
+    {
+        directionToLight = normalize(light.Position.xyz);
+        distanceAttenuation = 1.f;
+    }
+    //point
+    else
+    {
+        float3 vectorToLightSource = light.Position.xyz - pixelWorldPos;
+        float distanceToLight = length(vectorToLightSource);
+        
+        //normalize
+        directionToLight = vectorToLightSource / distanceToLight;
+        
+        //calculate attenuation - 0 in the center, 1 in the corner of range radius
+        float normalizedDistance = saturate(distanceToLight / light.Range);
+        
+        //smooth attenuation
+        distanceAttenuation = pow(1.f - normalizedDistance, 2.f);
+    }
+    
+    //diffuse lighting
+    float diffuseIntensity = max(dot(pixelNormal, directionToLight), 0.f);
+    
+    //glare lighing
+    float3 reflectionVector = reflect(-directionToLight, pixelNormal);
+    float specularIntensity = pow(max(dot(reflectionVector, vectorToCamera), 0.f), materialShininess);
+
+    float3 lightColorWithIntensity = light.Color.rgb * light.Color.a;
+    
+    float3 diffusePart = diffuseIntensity * lightColorWithIntensity;
+    float3 specularPart = specularIntensity * materialSpecularColor * lightColorWithIntensity;
+    
+    return (diffusePart + specularPart) * distanceAttenuation;
+}
 
 float4 PSMain(PS_IN input) : SV_Target
 {
@@ -146,24 +198,21 @@ float4 PSMain(PS_IN input) : SV_Target
     float3 LightDirection = normalize(SunlightDirection.xyz);
     float3 ViewDirection = normalize(CameraPosition.xyz - input.posW);
     
-    float4 texColor = DiffuseMap.Sample(TextureSampler, input.uv);
-       
-    float3 ambient = MaterialAmbientColor.rgb * SunlightColor.rgb;
-
-    float diffuseIntensity = max(dot(Normal, LightDirection), 0.0f);
-    float3 diffuse = diffuseIntensity * MaterialDiffuseColor.rgb * SunlightColor.rgb;
-
-    //Calc reflection vector
-    float3 ReflectionDirection = reflect(-LightDirection, Normal);
-    float specularIntensity = pow(max(dot(ReflectionDirection, ViewDirection), 0.0f), MaterialShininess);
-    float3 specular = specularIntensity * MaterialSpecularColor.rgb * SunlightColor.rgb;
     
     float4 shadowData = ComputeShadowFactor(input.posW, input.depth);
-    
     float3 debugTint = shadowData.xyz;
-    float shadowAmt = shadowData.w;
+    float shadow = shadowData.w;
     
-    float3 finalColor = (ambient + shadowAmt * (diffuse + specular)) * texColor.rgb;
+    float3 totalLighting = MaterialAmbientColor.rgb;
+    for (int i = 0; i < ActiveLightCount; ++i)
+    {
+        float currentShadow = (i == 0) ? shadow : 1.f;
+        
+        totalLighting += ComputeLight(Lights[i], input.posW, Normal, ViewDirection, MaterialShininess, currentShadow);
+    }    
+    
+    float4 texColor = DiffuseMap.Sample(TextureSampler, input.uv);
+    float3 finalColor = totalLighting * texColor.rgb;
 
     //return float4(saturate(finalColor * debugTint), texColor.a);
     return float4(saturate(finalColor), texColor.a);

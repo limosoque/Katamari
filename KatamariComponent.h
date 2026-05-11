@@ -7,6 +7,7 @@
 #include "Material.h"
 #include "DisplayWin32.h"
 #include "ShadowMap.h"
+#include "LightSource.h"
 
 #include <d3d11.h>
 #include <d3dcompiler.h>
@@ -18,6 +19,33 @@
 #include <memory>
 #include <random>
 
+struct ProjectileDesc {
+	float speed = 20.f;
+    float amplitude = 1.f;
+	float frequency = 2.f;
+    float lifetime = 3.f;
+    float lightRange = 15.f;
+    float fireCooldown = 0.2f;
+	float yBaseOffset = 1.5f;
+	float lightIntensity = 2.f;
+	DirectX::XMFLOAT4 color = { 0.f, 1.f, 0.5f, 1.f };
+
+    float visualScale = 0.3f;
+	Material material = Material::Ceramic();
+	std::wstring texturePath = L"assets/projectile/projectile_basecolor.png";
+
+	int maxProjectiles = MAX_LIGHTS - 1;
+
+    ProjectileDesc() {};
+};
+
+struct LightProjectile {
+    DirectX::XMFLOAT3 startPosition;
+    DirectX::XMFLOAT3 currentPosition;
+    DirectX::XMFLOAT3 direction;
+	float distanceTraveled = 0.f;
+	float age = 0.f;
+};
 
 struct alignas(16) PerObjectCB
 {
@@ -35,6 +63,11 @@ struct alignas(16) PerObjectCB
     DirectX::XMFLOAT4 SunlightColor;
     DirectX::XMFLOAT4 SunlightDirection;
     DirectX::XMFLOAT4 CameraPosition;
+
+	int ActiveLightCount;
+	float PaddingLights[3];
+
+    LightSource Lights[MAX_LIGHTS];
 
     DirectX::XMFLOAT4X4 LightViewProj[kCascadeCount];
     DirectX::XMFLOAT4   CascadeSplits;
@@ -89,6 +122,7 @@ public:
         std::wstring ballTexturePath,
         std::wstring floorTexturePath,
         std::wstring shaderPath = L"shaders/Katamari.hlsl",
+        ProjectileDesc projectileDescription = ProjectileDesc(),
         float sceneRadius = 60.0f);
 
     void Initialize() override;
@@ -104,6 +138,13 @@ private:
     std::wstring shaderPath;
 	std::wstring shadowShaderPath = L"shaders/ShadowPass.hlsl";
     float sceneRadius;
+
+	//Projectile
+	ProjectileDesc projectileDescription;
+    std::shared_ptr<Mesh> projectileMesh;
+	std::vector<LightProjectile> activeProjectiles;
+	float currentFireCooldown = 0.f;
+	DirectX::XMVECTOR lastMoveDirection = { 0, 0, 1, 0 };
 
     //Sun
     DirectX::XMFLOAT4 SunlightDirection = { 0.577f, 0.577f, 0.577f, 0.0f };
@@ -179,10 +220,17 @@ private:
     void BuildBallMesh();
     void BuildFloorMesh();
     void BuildObjectMeshes();
+	void BuildProjectileMesh();
     void ScatterObjects();
 
     void UpdateBallPhysics(float dt);
     void CheckAbsorption();
+
+	void UpdateCamera();
+
+    void ShootProjectile(float dt);
+    void UpdateProjectiles(float dt);
+    void DrawProjectile(ID3D11DeviceContext* context, const LightProjectile& projectile, const DirectX::XMMATRIX& view, const DirectX::XMMATRIX& projection, const DirectX::XMFLOAT3& camPos);
 
     void DrawBall(const DirectX::XMMATRIX& v, const DirectX::XMMATRIX& p, const DirectX::XMFLOAT3& cam);
     void DrawFreeObject(const SceneObject& obj, const DirectX::XMMATRIX& v, const DirectX::XMMATRIX& p, const DirectX::XMFLOAT3& cam);

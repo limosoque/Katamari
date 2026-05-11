@@ -26,12 +26,23 @@ int main()
             ObjectDesc("assets/mouse/W_hlmaus.obj", L"assets/mouse/Feldmaus_Diffuse.png", PlacementType::Flat, 12, 0.001f, 0.003f, 0.02f, Material::Organic())
         };
 
+		ProjectileDesc projectileDescription;
+        projectileDescription.speed = 25.f;
+		projectileDescription.color = { 0.f, 1.f, 0.5f, 1.f };
+		projectileDescription.lightIntensity = 3.f;
+        projectileDescription.lightRange = 12.f;
+        projectileDescription.visualScale = 0.25f;
+		projectileDescription.material = Material::Ceramic();
+		projectileDescription.texturePath = L"assets/projectile/projectile_basecolor.png";
+
+
         auto katamari = std::make_unique<KatamariComponent>(
             &game,
             objects,
             L"assets/ball/basketball/ball_basecolor.png",
             L"assets/ground/forrest_ground_01_diff_4k.jpg",
             L"shaders/Katamari.hlsl",
+            projectileDescription,
             20.0f                    
         );
 
