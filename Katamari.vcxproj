@@ -126,12 +126,14 @@
     <ClCompile Include="DisplayWin32.cpp" />
     <ClCompile Include="Game.cpp" />
     <ClCompile Include="GameComponent.cpp" />
+    <ClCompile Include="GBuffer.cpp" />
     <ClCompile Include="InputDevice.cpp" />
     <ClCompile Include="KatamariComponent.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="Mesh.cpp" />
     <ClCompile Include="MeshGenerator.cpp" />
     <ClCompile Include="ObjLoader.cpp" />
+    <ClCompile Include="RenderingSystem.cpp" />
     <ClCompile Include="ShadowMapHud.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -139,12 +141,14 @@
     <ClInclude Include="DisplayWin32.h" />
     <ClInclude Include="Game.h" />
     <ClInclude Include="GameComponent.h" />
+    <ClInclude Include="GBuffer.h" />
     <ClInclude Include="InputDevice.h" />
     <ClInclude Include="KatamariComponent.h" />
     <ClInclude Include="Material.h" />
     <ClInclude Include="Mesh.h" />
     <ClInclude Include="MeshGenerator.h" />
     <ClInclude Include="ObjLoader.h" />
+    <ClInclude Include="RenderingSystem.h" />
     <ClInclude Include="ShadowMap.h" />
     <ClInclude Include="ShadowMapHud.h" />
   </ItemGroup>
@@ -153,6 +157,14 @@
   </ItemGroup>
   <ItemGroup>
     <FxCompile Include="shaders\Katamari.hlsl">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+    </FxCompile>
+    <FxCompile Include="shaders\DeferredGeometry.hlsl">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+    </FxCompile>
+    <FxCompile Include="shaders\DeferredLighting.hlsl">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
     </FxCompile>

@@ -8,6 +8,7 @@
 #include "DisplayWin32.h"
 #include "ShadowMap.h"
 #include "ShadowMapHud.h"
+#include "RenderingSystem.h"
 
 #include <d3d11.h>
 #include <d3dcompiler.h>
@@ -200,6 +201,13 @@ private:
     bool shadowHudToggleHeld = false;
     bool shadowHudInvertToggleHeld = false;
 
+    // Deferred rendering
+    RenderingSystem renderingSystem;
+    bool demoSpotLightEnabled = true;
+    DirectX::XMFLOAT3 demoSpotLightColor = { 0.55f, 0.65f, 1.0f };
+    float demoSpotLightIntensity = 0.8f;
+    float demoSpotLightRange = 18.0f;
+
     //D3D
     Microsoft::WRL::ComPtr<ID3D11VertexShader> vertexShader;
     Microsoft::WRL::ComPtr<ID3D11PixelShader> pixelShader;
@@ -247,6 +255,8 @@ private:
     void DrawStuckObject(const SceneObject& obj, const DirectX::XMMATRIX& v, const DirectX::XMMATRIX& p, const DirectX::XMFLOAT3& cam);
     void DrawFloor(const DirectX::XMMATRIX& v, const DirectX::XMMATRIX& p, const DirectX::XMFLOAT3& cam);
     void DrawLightShots(const DirectX::XMMATRIX& v, const DirectX::XMMATRIX& p, const DirectX::XMFLOAT3& cam);
+    void ApplyForwardPipeline();
+    DeferredLightingData BuildDeferredLightingData(const DirectX::XMFLOAT3& camPos) const;
 
     void SetConstantBuffer(const DirectX::XMMATRIX& world, const DirectX::XMMATRIX& view, const DirectX::XMMATRIX& projection, const Material& material, const DirectX::XMFLOAT3& camPos, float groundTrailMask = 0.0f, float lightShotEmissive = 0.0f);
     void FillLightShotConstants(PerObjectCB* cb, float groundTrailMask, float lightShotEmissive) const;

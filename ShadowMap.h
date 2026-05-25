@@ -4,6 +4,7 @@
 #include <wrl/client.h>
 #include <array>
 #include <stdexcept>
+#include <vector>
 
 const int kCascadeCount = 3;
 

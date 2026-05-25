@@ -24,6 +24,9 @@
     <ClCompile Include="GameComponent.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="GBuffer.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="InputDevice.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -45,6 +48,9 @@
     <ClCompile Include="ObjLoader.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="RenderingSystem.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="ShadowMapHud.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -57,6 +63,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="GameComponent.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="GBuffer.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="InputDevice.h">
@@ -83,6 +92,9 @@
     <ClInclude Include="ShadowMap.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="RenderingSystem.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="ShadowMapHud.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -92,6 +104,12 @@
   </ItemGroup>
   <ItemGroup>
     <FxCompile Include="shaders\Katamari.hlsl">
+      <Filter>Resource Files</Filter>
+    </FxCompile>
+    <FxCompile Include="shaders\DeferredGeometry.hlsl">
+      <Filter>Resource Files</Filter>
+    </FxCompile>
+    <FxCompile Include="shaders\DeferredLighting.hlsl">
       <Filter>Resource Files</Filter>
     </FxCompile>
     <FxCompile Include="shaders\ShadowPass.hlsl">

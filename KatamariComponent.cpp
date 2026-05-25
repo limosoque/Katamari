@@ -44,6 +44,7 @@ void KatamariComponent::Initialize()
     CreateDepthStencilState();
     CreateBlendState();
     CreateSamplerState();
+    renderingSystem.Initialize(game, game->Display->ClientWidth, game->Display->ClientHeight);
 
     CompileShadowShader();
     CreateShadowConstantBuffer();
@@ -567,33 +568,16 @@ void KatamariComponent::Draw()
     //render depth from sun into each cascade map
     RenderShadowPass();
 
-	//restore main render target after shadow pass
-    game->RestoreTargets();
-
-    D3D11_VIEWPORT mainVp = {};
-    mainVp.Width = static_cast<float>(game->Display->ClientWidth);
-    mainVp.Height = static_cast<float>(game->Display->ClientHeight);
-    mainVp.MinDepth = 0.0f;
-    mainVp.MaxDepth = 1.0f;
-    ctx->RSSetViewports(1, &mainVp);
-
-    ID3D11ShaderResourceView* shadowSRV = shadow.srv.Get();
-    ctx->PSSetShaderResources(1, 1, &shadowSRV);
-    ctx->PSSetSamplers(1, 1, shadowSamplerState.GetAddressOf());
-
-    ctx->OMSetDepthStencilState(depthState.Get(), 0);
-    float blendFactor[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-    ctx->OMSetBlendState(blendState.Get(), blendFactor, 0xFFFFFFFF);
-    ctx->PSSetSamplers(0, 1, samplerState.GetAddressOf());
-
-    ctx->RSSetState(rastState.Get());
-    ctx->IASetInputLayout(inputLayout.Get());
-    ctx->VSSetShader(vertexShader.Get(), nullptr, 0);
-    ctx->PSSetShader(pixelShader.Get(), nullptr, 0);
-    ctx->VSSetConstantBuffers(0, 1, constantBuffer.GetAddressOf());
-    ctx->PSSetConstantBuffers(0, 1, constantBuffer.GetAddressOf());
-
     XMFLOAT3 camPos = camera.GetEyePosition(ballPos);
+    const int width = game->Display->ClientWidth;
+    const int height = game->Display->ClientHeight;
+
+    renderingSystem.BeginGeometryPass(
+        game->DepthView.Get(),
+        constantBuffer.Get(),
+        samplerState.Get(),
+        width,
+        height);
 
     DrawFloor(view, proj, camPos);
 
@@ -607,6 +591,27 @@ void KatamariComponent::Draw()
         if (obj.absorbed)
             DrawStuckObject(obj, view, proj, camPos);
 
+    renderingSystem.EndGeometryPass();
+
+    DeferredLightingData lightingData = BuildDeferredLightingData(camPos);
+    renderingSystem.RenderLighting(
+        lightingData,
+        shadow.srv.Get(),
+        shadowSamplerState.Get(),
+        game->RenderView.Get(),
+        width,
+        height);
+
+    game->RestoreTargets();
+
+    D3D11_VIEWPORT mainVp = {};
+    mainVp.Width = static_cast<float>(width);
+    mainVp.Height = static_cast<float>(height);
+    mainVp.MinDepth = 0.0f;
+    mainVp.MaxDepth = 1.0f;
+    ctx->RSSetViewports(1, &mainVp);
+
+    ApplyForwardPipeline();
     DrawLightShots(view, proj, camPos);
 
     shadowMapHud.Draw(
@@ -811,6 +816,108 @@ void KatamariComponent::DrawLightShots(const XMMATRIX& v, const XMMATRIX& p, con
 
         ballMesh->Draw(game->Context.Get());
     }
+}
+
+void KatamariComponent::ApplyForwardPipeline()
+{
+    auto* ctx = game->Context.Get();
+
+    ID3D11ShaderResourceView* shadowSRV = shadow.srv.Get();
+    ctx->PSSetShaderResources(1, 1, &shadowSRV);
+    ctx->PSSetSamplers(1, 1, shadowSamplerState.GetAddressOf());
+
+    ctx->OMSetDepthStencilState(depthState.Get(), 0);
+    float blendFactor[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    ctx->OMSetBlendState(blendState.Get(), blendFactor, 0xFFFFFFFF);
+    ctx->PSSetSamplers(0, 1, samplerState.GetAddressOf());
+
+    ctx->RSSetState(rastState.Get());
+    ctx->IASetInputLayout(inputLayout.Get());
+    ctx->VSSetShader(vertexShader.Get(), nullptr, 0);
+    ctx->PSSetShader(pixelShader.Get(), nullptr, 0);
+    ctx->GSSetShader(nullptr, nullptr, 0);
+    ctx->VSSetConstantBuffers(0, 1, constantBuffer.GetAddressOf());
+    ctx->PSSetConstantBuffers(0, 1, constantBuffer.GetAddressOf());
+}
+
+DeferredLightingData KatamariComponent::BuildDeferredLightingData(const XMFLOAT3& camPos) const
+{
+    DeferredLightingData data;
+    data.DirectionalDirection = SunlightDirection;
+    data.DirectionalColor = SunlightColor;
+    data.CameraPosition = XMFLOAT4(camPos.x, camPos.y, camPos.z, 1.0f);
+    data.CascadeSplits = XMFLOAT4(shadow.splitDepths[0], shadow.splitDepths[1], shadow.splitDepths[2], 0.0f);
+    data.TrailColor = XMFLOAT4(
+        lightShotSettings.color.x,
+        lightShotSettings.color.y,
+        lightShotSettings.color.z,
+        1.0f);
+
+    for (int i = 0; i < kCascadeCount; ++i)
+    {
+        data.LightViewProj[i] = shadow.lightViewProj[i];
+    }
+
+    data.PointLights.reserve(std::min(lightShots.size(), static_cast<size_t>(kMaxDeferredPointLights)));
+    for (const ActiveLightShot& shot : lightShots)
+    {
+        if (data.PointLights.size() >= static_cast<size_t>(kMaxDeferredPointLights))
+        {
+            break;
+        }
+
+        float intensity = lightShotSettings.intensity *
+            ComputeLightShotFade(shot.age, lightShotSettings.lifetime);
+        if (intensity <= 0.0f)
+        {
+            continue;
+        }
+
+        DeferredPointLight light;
+        light.Position = shot.position;
+        light.Range = lightShotSettings.range;
+        light.Color = lightShotSettings.color;
+        light.Intensity = intensity;
+        data.PointLights.push_back(light);
+    }
+
+    data.TrailStamps.reserve(std::min(lightTrailStamps.size(), static_cast<size_t>(kMaxDeferredTrailStamps)));
+    float trailLifetime = std::max(0.001f, lightShotSettings.trailLifetime);
+    for (const LightTrailStamp& stamp : lightTrailStamps)
+    {
+        if (data.TrailStamps.size() >= static_cast<size_t>(kMaxDeferredTrailStamps))
+        {
+            break;
+        }
+
+        float t = Clamp(stamp.age / trailLifetime, 0.0f, 1.0f);
+        float fade = (1.0f - t) * (1.0f - t);
+        float radius = lightShotSettings.trailRadius * (0.75f + 0.5f * t);
+        data.TrailStamps.emplace_back(
+            stamp.position.x,
+            stamp.position.z,
+            radius,
+            lightShotSettings.trailIntensity * fade);
+    }
+
+    if (demoSpotLightEnabled)
+    {
+        XMVECTOR spotPos = XMVectorSet(ballPos.x + 0.0f, ballPos.y + 8.0f, ballPos.z + 5.0f, 1.0f);
+        XMVECTOR target = XMVectorSet(ballPos.x, ballPos.y, ballPos.z, 1.0f);
+        XMVECTOR direction = XMVector3Normalize(target - spotPos);
+
+        DeferredSpotLight spot;
+        XMStoreFloat3(&spot.Position, spotPos);
+        XMStoreFloat3(&spot.Direction, direction);
+        spot.Range = demoSpotLightRange;
+        spot.Color = demoSpotLightColor;
+        spot.Intensity = demoSpotLightIntensity;
+        spot.InnerConeCos = std::cos(XMConvertToRadians(18.0f));
+        spot.OuterConeCos = std::cos(XMConvertToRadians(32.0f));
+        data.SpotLights.push_back(spot);
+    }
+
+    return data;
 }
 
 XMMATRIX KatamariComponent::BallWorldMatrix() const
@@ -1022,6 +1129,7 @@ void KatamariComponent::DrawSceneForShadow()
 }
 void KatamariComponent::DestroyResources()
 {
+    renderingSystem.DestroyResources();
     shadowMapHud.DestroyResources();
     shadowRastState.Reset();
     shadowCascadeBuffer.Reset();
