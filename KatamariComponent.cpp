@@ -51,6 +51,7 @@ void KatamariComponent::Initialize()
     CreateShadowRasterizerState();
     CreateShadowSamplerState();
     shadow.Create(game->Device.Get());
+    shadowMapHud.Initialize(game);
 
     BuildBallMesh();
     BuildObjectMeshes();
@@ -314,6 +315,7 @@ void KatamariComponent::Update(float dt)
 {
     UpdateBallPhysics(dt);
     UpdateLightShots(dt);  // Handles Space shooting, projectile motion, and trail aging
+    UpdateShadowHudInput(dt);
     CheckAbsorption();
 
     camera.Yaw = cameraYaw;
@@ -606,6 +608,44 @@ void KatamariComponent::Draw()
             DrawStuckObject(obj, view, proj, camPos);
 
     DrawLightShots(view, proj, camPos);
+
+    shadowMapHud.Draw(
+        shadow.srv.Get(),
+        kCascadeCount,
+        game->Display->ClientWidth,
+        game->Display->ClientHeight);
+}
+
+void KatamariComponent::UpdateShadowHudInput(float dt)
+{
+    auto* input = game->Input.get();
+    if (!input)
+    {
+        return;
+    }
+
+    bool f1Down = input->IsKeyDown(VK_F1);
+    if (f1Down && !shadowHudToggleHeld)
+    {
+        shadowMapHud.Enabled = !shadowMapHud.Enabled;
+    }
+    shadowHudToggleHeld = f1Down;
+
+    bool f2Down = input->IsKeyDown(VK_F2);
+    if (f2Down && !shadowHudInvertToggleHeld)
+    {
+        shadowMapHud.UseDepthContours = !shadowMapHud.UseDepthContours;
+    }
+    shadowHudInvertToggleHeld = f2Down;
+
+    if (input->IsKeyDown(VK_OEM_PERIOD))
+    {
+        shadowMapHud.Exposure = std::min(64.0f, shadowMapHud.Exposure + 12.0f * dt);
+    }
+    if (input->IsKeyDown(VK_OEM_COMMA))
+    {
+        shadowMapHud.Exposure = std::max(0.25f, shadowMapHud.Exposure - 12.0f * dt);
+    }
 }
 
 void KatamariComponent::SetConstantBuffer(
@@ -982,6 +1022,7 @@ void KatamariComponent::DrawSceneForShadow()
 }
 void KatamariComponent::DestroyResources()
 {
+    shadowMapHud.DestroyResources();
     shadowRastState.Reset();
     shadowCascadeBuffer.Reset();
     shadowConstantBuffer.Reset();

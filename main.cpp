@@ -41,6 +41,9 @@ int main()
         std::cout << "Controls:\n"
             << "W/A/S/D - move the ball\n"
             << "Space - shoot a terrain-following point light\n"
+            << "F1 - toggle shadow map HUD\n"
+            << "F2 - toggle shadow HUD contour preview\n"
+            << "</> - adjust shadow HUD exposure\n"
             << "Q/E - rotate camera left/right\n"
             << "Esc - quit\n\n";
 

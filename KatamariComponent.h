@@ -7,6 +7,7 @@
 #include "Material.h"
 #include "DisplayWin32.h"
 #include "ShadowMap.h"
+#include "ShadowMapHud.h"
 
 #include <d3d11.h>
 #include <d3dcompiler.h>
@@ -195,6 +196,9 @@ private:
     Microsoft::WRL::ComPtr<ID3D11Buffer> shadowCascadeBuffer;
     Microsoft::WRL::ComPtr<ID3D11RasterizerState> shadowRastState;
     Microsoft::WRL::ComPtr<ID3D11SamplerState> shadowSamplerState;
+    ShadowMapHud shadowMapHud;
+    bool shadowHudToggleHeld = false;
+    bool shadowHudInvertToggleHeld = false;
 
     //D3D
     Microsoft::WRL::ComPtr<ID3D11VertexShader> vertexShader;
@@ -216,6 +220,7 @@ private:
     void CreateShadowSamplerState();
     void RenderShadowPass();
     void DrawSceneForShadow();
+    void UpdateShadowHudInput(float dt);
 
     void CompileShaders();
     void CreateInputLayout();
