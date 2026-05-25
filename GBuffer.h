@@ -30,6 +30,10 @@ public:
 
     int Width() const { return width; }
     int Height() const { return height; }
+    ID3D11ShaderResourceView* GetShaderResourceView(Target target) const
+    {
+        return shaderResourceViews[static_cast<unsigned int>(target)].Get();
+    }
 
 private:
     Game* game = nullptr;

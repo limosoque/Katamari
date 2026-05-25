@@ -9,6 +9,8 @@
 #include "ShadowMap.h"
 #include "ShadowMapHud.h"
 #include "RenderingSystem.h"
+#include "ParticleSystem.h"
+#include "ParticleRenderer.h"
 
 #include <d3d11.h>
 #include <d3dcompiler.h>
@@ -189,6 +191,12 @@ private:
     float lightShotCooldown = 0.0f;                    //Remaining time until the next shot can spawn
     Material lightShotGlowMaterial = Material::Light();
 
+    // Particles
+    ParticleEmitterSettings lightShotParticleSettings;
+    ParticleSystem lightShotParticles;
+    ParticleRenderer particleRenderer;
+    std::vector<ParticleVertex> particleDrawVertices;
+
     // Shadow
     ShadowData shadow;
     Microsoft::WRL::ComPtr<ID3D11VertexShader> shadowVertexShader;
@@ -247,6 +255,7 @@ private:
     void UpdateLightShots(float dt);
     void SpawnLightShot();
     void EmitLightTrail(const DirectX::XMFLOAT3& shotPosition);
+    void EmitShotParticles(const DirectX::XMFLOAT3& shotPosition, const DirectX::XMFLOAT3& shotDirection, int burstCount);
     DirectX::XMVECTOR LightShotSpawnDirection() const;
     float ComputeLightShotFade(float age, float lifetime) const;
 
@@ -255,6 +264,7 @@ private:
     void DrawStuckObject(const SceneObject& obj, const DirectX::XMMATRIX& v, const DirectX::XMMATRIX& p, const DirectX::XMFLOAT3& cam);
     void DrawFloor(const DirectX::XMMATRIX& v, const DirectX::XMMATRIX& p, const DirectX::XMFLOAT3& cam);
     void DrawLightShots(const DirectX::XMMATRIX& v, const DirectX::XMMATRIX& p, const DirectX::XMFLOAT3& cam);
+    void DrawParticles(const DirectX::XMMATRIX& v, const DirectX::XMMATRIX& p, const DirectX::XMFLOAT3& cam, int width, int height);
     void ApplyForwardPipeline();
     DeferredLightingData BuildDeferredLightingData(const DirectX::XMFLOAT3& camPos) const;
 

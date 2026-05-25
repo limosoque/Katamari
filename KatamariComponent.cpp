@@ -45,6 +45,9 @@ void KatamariComponent::Initialize()
     CreateBlendState();
     CreateSamplerState();
     renderingSystem.Initialize(game, game->Display->ClientWidth, game->Display->ClientHeight);
+    lightShotParticles.Initialize(lightShotParticleSettings);
+    particleRenderer.Initialize(game, lightShotParticleSettings.maxParticles);
+    particleDrawVertices.reserve(lightShotParticleSettings.maxParticles);
 
     CompileShadowShader();
     CreateShadowConstantBuffer();
@@ -316,6 +319,7 @@ void KatamariComponent::Update(float dt)
 {
     UpdateBallPhysics(dt);
     UpdateLightShots(dt);  // Handles Space shooting, projectile motion, and trail aging
+    lightShotParticles.Update(dt);
     UpdateShadowHudInput(dt);
     CheckAbsorption();
 
@@ -468,6 +472,10 @@ void KatamariComponent::UpdateLightShots(float dt)
             GetTerrainHeight(px, pz) + lightShotSettings.hoverHeight,
             pz);
 
+        XMFLOAT3 particleDirection;
+        XMStoreFloat3(&particleDirection, -dir);
+        lightShotParticles.EmitContinuous(shot.position, particleDirection, dt);
+
         shot.trailClock += dt;    
         while (shot.trailClock >= trailInterval)
         {
@@ -513,6 +521,7 @@ void KatamariComponent::SpawnLightShot()
 
     lightShots.push_back(shot); //register projectile for update and shader upload
     EmitLightTrail(shot.position); // Place the first glow immediately
+    EmitShotParticles(shot.position, shot.direction, lightShotParticleSettings.burstCount);
 }
 
 void KatamariComponent::EmitLightTrail(const XMFLOAT3& shotPosition)
@@ -533,6 +542,14 @@ void KatamariComponent::EmitLightTrail(const XMFLOAT3& shotPosition)
         GetTerrainHeight(shotPosition.x, shotPosition.z) + 0.03f,
         shotPosition.z);
     lightTrailStamps.push_back(stamp); //Store stamp for fading and shader upload.
+}
+
+void KatamariComponent::EmitShotParticles(const XMFLOAT3& shotPosition, const XMFLOAT3& shotDirection, int burstCount)
+{
+    XMVECTOR direction = -XMVector3Normalize(XMLoadFloat3(&shotDirection));
+    XMFLOAT3 particleDirection;
+    XMStoreFloat3(&particleDirection, direction);
+    lightShotParticles.EmitBurst(shotPosition, particleDirection, burstCount);
 }
 
 XMVECTOR KatamariComponent::LightShotSpawnDirection() const
@@ -613,6 +630,7 @@ void KatamariComponent::Draw()
 
     ApplyForwardPipeline();
     DrawLightShots(view, proj, camPos);
+    DrawParticles(view, proj, camPos, width, height);
 
     shadowMapHud.Draw(
         shadow.srv.Get(),
@@ -816,6 +834,25 @@ void KatamariComponent::DrawLightShots(const XMMATRIX& v, const XMMATRIX& p, con
 
         ballMesh->Draw(game->Context.Get());
     }
+}
+
+void KatamariComponent::DrawParticles(const XMMATRIX& v, const XMMATRIX& p, const XMFLOAT3& cam, int width, int height)
+{
+    if (lightShotParticles.AliveCount() == 0)
+    {
+        return;
+    }
+
+    lightShotParticles.BuildVertices(cam, particleDrawVertices);
+    particleRenderer.Draw(
+        particleDrawVertices,
+        v,
+        p,
+        game->RenderView.Get(),
+        game->DepthView.Get(),
+        renderingSystem.GetGBuffer().GetShaderResourceView(GBuffer::SpecularViewDepth),
+        width,
+        height);
 }
 
 void KatamariComponent::ApplyForwardPipeline()
@@ -1129,6 +1166,8 @@ void KatamariComponent::DrawSceneForShadow()
 }
 void KatamariComponent::DestroyResources()
 {
+    particleRenderer.DestroyResources();
+    lightShotParticles.Clear();
     renderingSystem.DestroyResources();
     shadowMapHud.DestroyResources();
     shadowRastState.Reset();
@@ -1147,6 +1186,7 @@ void KatamariComponent::DestroyResources()
     vsBytecode.Reset();
     lightShots.clear();
     lightTrailStamps.clear();
+    particleDrawVertices.clear();
     objects.clear();
     meshPool.clear();
     ballMesh.reset();
