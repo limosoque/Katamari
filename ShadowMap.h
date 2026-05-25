@@ -135,7 +135,8 @@ struct ShadowData
             }
             center /= XMVectorReplicate(static_cast<float>(corners.size()));
 
-            XMMATRIX lightView = XMMatrixLookAtLH(center + lightDir, center, up);
+            float pullbackDistance = 100.0f;
+            XMMATRIX lightView = XMMatrixLookAtLH(center + lightDir * pullbackDistance, center, up);
 
             float minX = FLT_MAX, maxX = -FLT_MAX;
             float minY = FLT_MAX, maxY = -FLT_MAX;
@@ -155,9 +156,12 @@ struct ShadowData
             }
 
             //expand near/far by zMult to catch offscreen shadow casters
-            constexpr float zMult = 10.0f;
-            minZ = (minZ < 0.0f) ? minZ * zMult : minZ / zMult;
-            maxZ = (maxZ < 0.0f) ? maxZ / zMult : maxZ * zMult;
+            //float zMult = 10.0f;
+            //minZ = (minZ < 0.0f) ? minZ * zMult : minZ / zMult;
+            //maxZ = (maxZ < 0.0f) ? maxZ / zMult : maxZ * zMult;
+            float zMargin = 100.0f;
+            minZ -= zMargin;
+            maxZ += zMargin;
 
 			//texel snap the AABB to stabilize shimmering
             float width = maxX - minX;

@@ -26,7 +26,7 @@ KatamariComponent::KatamariComponent(
     std::wstring shaderPath,
     float sceneRad)
     : GameComponent(owner),
-    objectDescs(std::move(descs)), 
+    objectDescs(std::move(descs)),
     ballTexPath(std::move(ballTex)),
     floorTexPath(std::move(floorTex)),
     shaderPath(std::move(shaderPath)),
@@ -313,6 +313,7 @@ void KatamariComponent::ScatterObjects()
 void KatamariComponent::Update(float dt)
 {
     UpdateBallPhysics(dt);
+    UpdateLightShots(dt);  // Handles Space shooting, projectile motion, and trail aging
     CheckAbsorption();
 
     camera.Yaw = cameraYaw;
@@ -342,12 +343,14 @@ void KatamariComponent::UpdateBallPhysics(float dt)
     float moveLen = XMVectorGetX(XMVector3Length(move));
     if (moveLen > 0.001f)
     {
-        XMVECTOR moveDelta = XMVectorScale(move, speed * dt / moveLen);
+        XMVECTOR normalizedMove = XMVectorScale(move, 1.0f / moveLen);
+
+        XMVECTOR moveDelta = XMVectorScale(normalizedMove, speed * dt);
         posV = XMVectorAdd(posV, moveDelta);
 
         //Visual rotaiton
         XMVECTOR up = XMVectorSet(0, 1, 0, 0);
-        XMVECTOR rollAxis = XMVector3Normalize(XMVector3Cross(up, move));
+        XMVECTOR rollAxis = XMVector3Normalize(XMVector3Cross(up, normalizedMove));
         float angle = (speed * dt) / ballRadius;
         XMVECTOR q = XMQuaternionRotationAxis(rollAxis, angle);
         XMMATRIX rot = XMMatrixRotationQuaternion(q);
@@ -355,14 +358,14 @@ void KatamariComponent::UpdateBallPhysics(float dt)
         XMStoreFloat4x4(&ballOrientMtx, prev * rot);
     }
 
-    //border moving 
+    //border moving
     float px = XMVectorGetX(posV);
     float pz = XMVectorGetZ(posV);
     float lim = sceneRadius - ballRadius;
-  
+
     px = Clamp(px, -lim, lim);
     pz = Clamp(pz, -lim, lim);
-    float py = GetTerrainHeight(px, pz) + ballRadius;
+    float py = GetTerrainHeight(px, pz) + ballRadius * 0.9f;
 
     ballPos = XMFLOAT3(px, py, pz);
 }
@@ -412,6 +415,142 @@ void KatamariComponent::CheckAbsorption()
     }
 }
 
+void KatamariComponent::UpdateLightShots(float dt)
+{
+    lightShotCooldown = std::max(0.0f, lightShotCooldown - dt);
+
+    auto* input = game->Input.get();
+    if (input && input->IsKeyDown(VK_SPACE) && lightShotCooldown <= 0.0f)
+    {
+        SpawnLightShot();
+        lightShotCooldown = std::max(0.01f, lightShotSettings.fireCooldown); 
+    }
+
+    for (auto& stamp : lightTrailStamps)
+    {
+        stamp.age += dt;    //trail fade timer
+    }
+
+    lightTrailStamps.erase(
+        std::remove_if(lightTrailStamps.begin(), lightTrailStamps.end(),
+            [&](const LightTrailStamp& stamp)
+            {
+                return stamp.age >= lightShotSettings.trailLifetime;    //Drop fully faded trail stamps
+            }),
+        lightTrailStamps.end());
+
+    const float sceneLimit = sceneRadius - 0.25f;    //Keep projectiles inside the playable area
+    const float trailInterval = std::max(0.001f, lightShotSettings.trailEmitInterval);
+
+    for (auto& shot : lightShots)
+    {
+        shot.age += dt;    //projectile lifetime timer
+        if (shot.age >= lightShotSettings.lifetime)
+        {
+            continue;
+        }
+
+        XMVECTOR dir = XMVector3Normalize(XMLoadFloat3(&shot.direction)); 
+        float px = shot.position.x + XMVectorGetX(dir) * lightShotSettings.speed * dt;    //X movement
+		float pz = shot.position.z + XMVectorGetZ(dir) * lightShotSettings.speed * dt;    //z movement
+
+        if (px < -sceneLimit || px > sceneLimit || pz < -sceneLimit || pz > sceneLimit)
+        {
+            shot.age = lightShotSettings.lifetime;    //Mark out-of-bounds projectiles for removal
+            continue;
+        }
+
+        shot.position = XMFLOAT3(
+            px,
+            GetTerrainHeight(px, pz) + lightShotSettings.hoverHeight,
+            pz);
+
+        shot.trailClock += dt;    
+        while (shot.trailClock >= trailInterval)
+        {
+            EmitLightTrail(shot.position); 
+            shot.trailClock -= trailInterval;
+        }
+    }
+
+    lightShots.erase(
+        std::remove_if(lightShots.begin(), lightShots.end(),
+            [&](const ActiveLightShot& shot)
+            {
+                return shot.age >= lightShotSettings.lifetime;    // Remove expired projectiles
+            }),
+        lightShots.end());
+}
+
+void KatamariComponent::SpawnLightShot()
+{
+    if (lightShotSettings.lifetime <= 0.0f || lightShotSettings.intensity <= 0.0f)
+    {
+        return;
+    }
+
+    if (lightShots.size() >= kMaxShotLights)
+    {
+        lightShots.erase(lightShots.begin());  
+    }
+
+    XMVECTOR dir = LightShotSpawnDirection();
+    XMVECTOR start = XMVectorAdd(
+        XMLoadFloat3(&ballPos),
+        XMVectorScale(dir, ballRadius + lightShotSettings.spawnForwardOffset));
+
+    float sceneLimit = sceneRadius - 0.25f;
+    float sx = Clamp(XMVectorGetX(start), -sceneLimit, sceneLimit);
+    float sz = Clamp(XMVectorGetZ(start), -sceneLimit, sceneLimit);
+
+    ActiveLightShot shot;
+    shot.position = XMFLOAT3(sx, GetTerrainHeight(sx, sz) + lightShotSettings.hoverHeight, sz);
+    XMStoreFloat3(&shot.direction, dir);
+    shot.trailClock = 0.0f;
+
+    lightShots.push_back(shot); //register projectile for update and shader upload
+    EmitLightTrail(shot.position); // Place the first glow immediately
+}
+
+void KatamariComponent::EmitLightTrail(const XMFLOAT3& shotPosition)
+{
+    if (lightShotSettings.trailLifetime <= 0.0f || lightShotSettings.trailIntensity <= 0.0f)
+    {
+        return;
+    }
+
+    if (lightTrailStamps.size() >= kMaxShotTrailStamps)
+    {
+        lightTrailStamps.erase(lightTrailStamps.begin());
+    }
+
+    LightTrailStamp stamp;
+    stamp.position = XMFLOAT3(
+        shotPosition.x,
+        GetTerrainHeight(shotPosition.x, shotPosition.z) + 0.03f,
+        shotPosition.z);
+    lightTrailStamps.push_back(stamp); //Store stamp for fading and shader upload.
+}
+
+XMVECTOR KatamariComponent::LightShotSpawnDirection() const
+{
+    XMVECTOR dir = XMVectorSet(-std::sin(cameraYaw), 0.0f, -std::cos(cameraYaw), 0.0f); //Fire forward relative to camera yaw
+    return XMVector3Normalize(dir);
+}
+
+float KatamariComponent::ComputeLightShotFade(float age, float lifetime) const
+{
+    if (lifetime <= 0.0f)
+    {
+        return 0.0f;
+    }
+
+    float t = Clamp(age / lifetime, 0.0f, 1.0f);    //Normalized lifetime progress
+    float fadeIn = Clamp(age / 0.08f, 0.0f, 1.0f); 
+    float fadeOut = std::pow(1.0f - t, 0.65f);
+    return fadeIn * fadeOut; 
+}
+
 void KatamariComponent::Draw()
 {
     auto* ctx = game->Context.Get();
@@ -452,8 +591,6 @@ void KatamariComponent::Draw()
     ctx->VSSetConstantBuffers(0, 1, constantBuffer.GetAddressOf());
     ctx->PSSetConstantBuffers(0, 1, constantBuffer.GetAddressOf());
 
-    //view = camera.GetView(ballPos);
-    //proj = camera.GetProjection();
     XMFLOAT3 camPos = camera.GetEyePosition(ballPos);
 
     DrawFloor(view, proj, camPos);
@@ -467,11 +604,13 @@ void KatamariComponent::Draw()
     for (const auto& obj : objects)
         if (obj.absorbed)
             DrawStuckObject(obj, view, proj, camPos);
+
+    DrawLightShots(view, proj, camPos);
 }
 
 void KatamariComponent::SetConstantBuffer(
     const XMMATRIX& world, const XMMATRIX& view, const XMMATRIX& projection,
-    const Material& material, const XMFLOAT3& camPos)
+    const Material& material, const XMFLOAT3& camPos, float groundTrailMask, float lightShotEmissive)
 {
     D3D11_MAPPED_SUBRESOURCE mapped;
     if (FAILED(game->Context->Map(constantBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
@@ -499,7 +638,66 @@ void KatamariComponent::SetConstantBuffer(
     }
     cb->CascadeSplits = XMFLOAT4(shadow.splitDepths[0], shadow.splitDepths[1], shadow.splitDepths[2], 0.0f);
 
+    FillLightShotConstants(cb, groundTrailMask, lightShotEmissive);
+
     game->Context->Unmap(constantBuffer.Get(), 0);
+}
+
+void KatamariComponent::FillLightShotConstants(PerObjectCB* cb, float groundTrailMask, float lightShotEmissive) const
+{
+    cb->ShotLightColorAndRange = XMFLOAT4(
+        lightShotSettings.color.x,
+        lightShotSettings.color.y,
+        lightShotSettings.color.z,
+        lightShotSettings.range);
+
+    for (int i = 0; i < kMaxShotLights; ++i)
+    {
+        cb->ShotLights[i] = XMFLOAT4(0, 0, 0, 0);    //Clear stale light slots from previous frames
+    }
+
+    //Upload active moving point lights
+    size_t lightCount = std::min(lightShots.size(), static_cast<size_t>(kMaxShotLights));
+    for (size_t i = 0; i < lightCount; ++i)
+    {
+        const ActiveLightShot& shot = lightShots[i];
+        float intensity = lightShotSettings.intensity *
+            ComputeLightShotFade(shot.age, lightShotSettings.lifetime); //Fade light by lifetime
+
+        cb->ShotLights[i] = XMFLOAT4(
+            shot.position.x,
+            shot.position.y,
+            shot.position.z,
+            intensity);    //xyz = light center, w = faded intensity
+    }
+
+    for (int i = 0; i < kMaxShotTrailStamps; ++i)
+    {
+        cb->ShotTrailStamps[i] = XMFLOAT4(0, 0, 0, 0);    //Clear stale trail slots from previous frames
+    }
+
+    //upload fading ground glow stamps
+    size_t trailCount = std::min(lightTrailStamps.size(), static_cast<size_t>(kMaxShotTrailStamps));
+    float trailLifetime = std::max(0.001f, lightShotSettings.trailLifetime);
+    for (size_t i = 0; i < trailCount; ++i)
+    {
+        const LightTrailStamp& stamp = lightTrailStamps[i];
+        float t = Clamp(stamp.age / trailLifetime, 0.0f, 1.0f);    //stamp age
+        float fade = (1.0f - t) * (1.0f - t);                     //quadratic fade-out
+        float radius = lightShotSettings.trailRadius * (0.75f + 0.5f * t);//expand glow as it fades
+
+        cb->ShotTrailStamps[i] = XMFLOAT4(
+            stamp.position.x,
+            stamp.position.z,
+            radius,
+            lightShotSettings.trailIntensity * fade); // xy = ground XZ, z = radius, w = faded intensity
+    }
+
+    cb->ShotLightCountsAndFlags = XMFLOAT4(
+        static_cast<float>(lightCount),     //Number of valid ShotLights entries
+        static_cast<float>(trailCount),     //Number of valid ShotTrailStamps entries
+        groundTrailMask,                    //Enables trail rendering for the floor only
+        lightShotEmissive);                 //Enables emissive rendering for visible shot spheres
 }
 
 void KatamariComponent::DrawBall(const XMMATRIX& v, const XMMATRIX& p, const XMFLOAT3& cam)
@@ -539,13 +737,40 @@ void KatamariComponent::DrawStuckObject(const SceneObject& obj,
 
 void KatamariComponent::DrawFloor(const XMMATRIX& v, const XMMATRIX& p, const XMFLOAT3& cam)
 {
-    SetConstantBuffer(XMMatrixIdentity(), v, p, floorMaterial, cam);
+    SetConstantBuffer(XMMatrixIdentity(), v, p, floorMaterial, cam, 1.0f);    //Enable trail glow on terrain
 
     ID3D11ShaderResourceView* srv = floorMesh->GetTexture();
     game->Context->PSSetShaderResources(0, 1, &srv);
 
     floorMesh->Bind(game->Context.Get());
     floorMesh->Draw(game->Context.Get());
+}
+
+void KatamariComponent::DrawLightShots(const XMMATRIX& v, const XMMATRIX& p, const XMFLOAT3& cam)
+{
+    if (lightShots.empty())
+    {
+        return;
+    }
+
+    ID3D11ShaderResourceView* srv = ballMesh->GetTexture();
+    game->Context->PSSetShaderResources(0, 1, &srv);
+    ballMesh->Bind(game->Context.Get());    //Reuse the sphere mesh for shot visuals
+
+    Material glowMaterial = Material::Light();              
+    for (const auto& shot : lightShots)
+    {
+        float fade = ComputeLightShotFade(shot.age, lightShotSettings.lifetime);    //Match visual fade to light fade
+		float radius = lightShotSettings.visualRadius * (0.85f + 0.15f * fade);    //Slightly scale sphere with fade
+
+        XMMATRIX world =
+            XMMatrixScaling(radius, radius, radius) *
+            XMMatrixTranslation(shot.position.x, shot.position.y, shot.position.z);    //Place sphere at projectile center
+
+        SetConstantBuffer(world, v, p, glowMaterial, cam, 0.0f, lightShotSettings.visualIntensity * fade);
+
+        ballMesh->Draw(game->Context.Get());
+    }
 }
 
 XMMATRIX KatamariComponent::BallWorldMatrix() const
@@ -656,9 +881,9 @@ void KatamariComponent::CreateShadowRasterizerState()
 {
     CD3D11_RASTERIZER_DESC desc(D3D11_DEFAULT);
     desc.CullMode = D3D11_CULL_FRONT;
-    desc.DepthBias = 5000;
-    desc.SlopeScaledDepthBias = 2.0f;
-    desc.DepthBiasClamp = 0.01f; 
+    desc.DepthBias = 1000;
+    desc.SlopeScaledDepthBias = 1.0f;
+    desc.DepthBiasClamp = 0.0f;
     if (FAILED(game->Device->CreateRasterizerState(&desc, shadowRastState.GetAddressOf())))
     {
         throw std::runtime_error("CreateRasterizerState (shadow) failed.");
@@ -771,6 +996,8 @@ void KatamariComponent::DestroyResources()
     pixelShader.Reset();
     vertexShader.Reset();
     vsBytecode.Reset();
+    lightShots.clear();
+    lightTrailStamps.clear();
     objects.clear();
     meshPool.clear();
     ballMesh.reset();
@@ -819,7 +1046,7 @@ XMVECTOR KatamariComponent::GetRotationBetweenVectors(XMVECTOR from, XMVECTOR to
         return XMQuaternionRotationAxis(XMVectorSet(1, 0, 0, 0), XM_PI);
     }
 
-    //axis is vector cross 
+    //axis is vector cross
     XMVECTOR axis = XMVector3Normalize(XMVector3Cross(from, to));
     //angle of rotation
     float angle = acosf(dot);

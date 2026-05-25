@@ -18,6 +18,8 @@
 #include <memory>
 #include <random>
 
+static constexpr int kMaxShotLights = 8; //Max active shot lights sent to the shader
+static constexpr int kMaxShotTrailStamps = 64; //Max active trail stamps sent to the shader
 
 struct alignas(16) PerObjectCB
 {
@@ -38,6 +40,11 @@ struct alignas(16) PerObjectCB
 
     DirectX::XMFLOAT4X4 LightViewProj[kCascadeCount];
     DirectX::XMFLOAT4   CascadeSplits;
+
+    DirectX::XMFLOAT4 ShotLightColorAndRange; // rgb = shot color, a = point-light range
+    DirectX::XMFLOAT4 ShotLightCountsAndFlags;// x = light count, y = trail count, z = ground mask, w = emissive
+    DirectX::XMFLOAT4 ShotLights[kMaxShotLights];// xyz = light position, w = faded intensity
+    DirectX::XMFLOAT4 ShotTrailStamps[kMaxShotTrailStamps];// xy = ground XZ center, z = radius, w = faded intensity
 };
 
 struct SceneObject
@@ -46,7 +53,7 @@ struct SceneObject
 
 	//Object state while not absorbed
     DirectX::XMFLOAT3 position = { 0, 0, 0 };
-	DirectX::XMFLOAT3 rotation = { 0, 0, 0 };   //euler angles in radians
+	DirectX::XMFLOAT3 rotation = { 0, 0, 0 }; //euler angles in radians
     float scale = 1.0f;
     float worldRadius = 1.0f;
     DirectX::XMFLOAT4 color = { 1, 1, 1, 1 };
@@ -80,6 +87,24 @@ struct ObjectDesc
         : objPath(obj), texPath(tex), placement(p), count(c), minScale(minS), maxScale(maxS), yOffset(yOff), material(m) {}
 };
 
+struct LightShotSettings
+{
+    float intensity = 2.f;                               // Point-light power used by scene shading
+    float range = 6.0f;                                  // Point-light radius in world units
+    float speed = 14.0f;                                 
+    float lifetime = 3.f;                                
+    float fireCooldown = 0.5f;                           
+    float hoverHeight = 1.5f;                            // Height above terrain height
+    float spawnForwardOffset = 0.f;                      // Extra spawn distance in front of the ball
+    float visualRadius = 0.1f;                           // Rendered emissive sphere radius
+    float visualIntensity = 2.f;                         // Brightness of the rendered sphere
+    float trailEmitInterval = 0.02f;                     // Seconds between trail stamps
+    float trailLifetime = 0.1f;                          // Seconds before a trail stamp fades out
+    float trailRadius = 0.05f;                           // Base radius of each ground glow stamp
+    float trailIntensity = 0.05f;                        // Base brightness of each ground glow stamp
+    DirectX::XMFLOAT3 color = { 1.0f, 0.75f, 0.35f };    // Shared color for light, sphere, and trail
+};
+
 class KatamariComponent : public GameComponent
 {
 public:
@@ -98,8 +123,24 @@ public:
 
     float BallRadius() const { return ballRadius; }
     int AbsorbedCount() const { return absorbedCount; }
+    LightShotSettings& ShotSettings() { return lightShotSettings; }
+    const LightShotSettings& ShotSettings() const { return lightShotSettings; }
 
 private:
+    struct ActiveLightShot
+    {
+        DirectX::XMFLOAT3 position = { 0, 0, 0 };     // Current world-space center
+        DirectX::XMFLOAT3 direction = { 0, 0, -1 };   // Fixed horizontal travel direction
+        float age = 0.0f;                             //in secs
+        float trailClock = 0.0f;                      // time until next trail stamp
+    };
+
+    struct LightTrailStamp
+    {
+        DirectX::XMFLOAT3 position = { 0, 0, 0 };     // Ground-space stamp center
+        float age = 0.0f;                             //in secs
+    };
+
     std::vector<ObjectDesc> objectDescs;
     std::wstring shaderPath;
 	std::wstring shadowShaderPath = L"shaders/ShadowPass.hlsl";
@@ -138,6 +179,13 @@ private:
 
     //Stats
     int absorbedCount = 0;
+
+    // Light shots
+    LightShotSettings lightShotSettings;               //Tunable shooting and lighting parameters
+    std::vector<ActiveLightShot> lightShots;           //Active moving light projectiles
+    std::vector<LightTrailStamp> lightTrailStamps;     //Active fading ground glow stamps
+    float lightShotCooldown = 0.0f;                    //Remaining time until the next shot can spawn
+    Material lightShotGlowMaterial = Material::Light();
 
     // Shadow
     ShadowData shadow;
@@ -183,13 +231,20 @@ private:
 
     void UpdateBallPhysics(float dt);
     void CheckAbsorption();
+    void UpdateLightShots(float dt);
+    void SpawnLightShot();
+    void EmitLightTrail(const DirectX::XMFLOAT3& shotPosition);
+    DirectX::XMVECTOR LightShotSpawnDirection() const;
+    float ComputeLightShotFade(float age, float lifetime) const;
 
     void DrawBall(const DirectX::XMMATRIX& v, const DirectX::XMMATRIX& p, const DirectX::XMFLOAT3& cam);
     void DrawFreeObject(const SceneObject& obj, const DirectX::XMMATRIX& v, const DirectX::XMMATRIX& p, const DirectX::XMFLOAT3& cam);
     void DrawStuckObject(const SceneObject& obj, const DirectX::XMMATRIX& v, const DirectX::XMMATRIX& p, const DirectX::XMFLOAT3& cam);
     void DrawFloor(const DirectX::XMMATRIX& v, const DirectX::XMMATRIX& p, const DirectX::XMFLOAT3& cam);
+    void DrawLightShots(const DirectX::XMMATRIX& v, const DirectX::XMMATRIX& p, const DirectX::XMFLOAT3& cam);
 
-    void SetConstantBuffer(const DirectX::XMMATRIX& world, const DirectX::XMMATRIX& view, const DirectX::XMMATRIX& projection, const Material& material, const DirectX::XMFLOAT3& camPos);
+    void SetConstantBuffer(const DirectX::XMMATRIX& world, const DirectX::XMMATRIX& view, const DirectX::XMMATRIX& projection, const Material& material, const DirectX::XMFLOAT3& camPos, float groundTrailMask = 0.0f, float lightShotEmissive = 0.0f);
+    void FillLightShotConstants(PerObjectCB* cb, float groundTrailMask, float lightShotEmissive) const;
 
     DirectX::XMMATRIX BallWorldMatrix() const;
     DirectX::XMMATRIX FreeObjectWorldMatrix(const SceneObject&) const;

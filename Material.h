@@ -84,4 +84,14 @@ struct Material
         m.Shininess = 16.0f;
         return m;
     }
+
+    static Material Light()
+    {
+        Material m;
+        m.Ambient = { 1.0f, 1.0f, 1.0f, 1.0f };
+        m.Diffuse = { 1.0f, 1.0f, 1.0f, 1.0f };
+        m.Specular = { 1.0f, 1.0f, 1.0f, 1.0f };
+        m.Shininess = 16.0f;
+        return m;
+    }
 };

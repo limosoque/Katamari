@@ -40,6 +40,7 @@ int main()
 
         std::cout << "Controls:\n"
             << "W/A/S/D - move the ball\n"
+            << "Space - shoot a terrain-following point light\n"
             << "Q/E - rotate camera left/right\n"
             << "Esc - quit\n\n";
 
