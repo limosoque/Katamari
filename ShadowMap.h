@@ -54,7 +54,7 @@ struct ShadowData
     std::array<DirectX::XMFLOAT4X4, kCascadeCount> lightViewProj;
 
     //cascade split deths
-    std::array<float, kCascadeCount> splitDepths = { 12.0f, 17.0f, 90.0f };
+    std::array<float, kCascadeCount> splitDepths = { 12.0f, 35.0f, 90.0f };
 
     void Create(ID3D11Device* device)
     {

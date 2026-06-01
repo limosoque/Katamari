@@ -27,6 +27,9 @@
     <ClCompile Include="GBuffer.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="GBufferPicker.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="InputDevice.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -74,6 +77,9 @@
     <ClInclude Include="GBuffer.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="GBufferPicker.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="InputDevice.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -115,7 +121,7 @@
     <None Include="packages.config" />
   </ItemGroup>
   <ItemGroup>
-    <FxCompile Include="shaders\Katamari.hlsl">
+    <FxCompile Include="shaders\LightShotVisual.hlsl">
       <Filter>Resource Files</Filter>
     </FxCompile>
     <FxCompile Include="shaders\DeferredGeometry.hlsl">
@@ -124,7 +130,13 @@
     <FxCompile Include="shaders\DeferredLighting.hlsl">
       <Filter>Resource Files</Filter>
     </FxCompile>
+    <FxCompile Include="shaders\GBufferPick.hlsl">
+      <Filter>Resource Files</Filter>
+    </FxCompile>
     <FxCompile Include="shaders\Particles.hlsl">
+      <Filter>Resource Files</Filter>
+    </FxCompile>
+    <FxCompile Include="shaders\ParticlesCompute.hlsl">
       <Filter>Resource Files</Filter>
     </FxCompile>
     <FxCompile Include="shaders\ShadowPass.hlsl">

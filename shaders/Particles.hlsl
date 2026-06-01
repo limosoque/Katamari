@@ -8,22 +8,26 @@ cbuffer ParticleFrameCB : register(b0)
     float4 Params; // x = soft particle fade distance.
 };
 
-Texture2D<float4> SceneSpecularViewDepth : register(t0);
-
-struct VS_IN
+struct GpuParticle
 {
-    float3 position : POSITION;
-    float size : TEXCOORD0;
-    float4 color : COLOR0;
-    float4 params : TEXCOORD1; // x = rotation, y = edge softness, z = normalized age, w = brightness.
+    float4 PositionAge;       // xyz = world position, w = age.
+    float4 VelocityLifetime;  // xyz = velocity, w = lifetime.
+    float4 StartColor;
+    float4 EndColor;
+    float4 SizeRotation;      // x = start size, y = end size, z = rotation, w = angular velocity.
+    float4 ParticleParams;    // x = weight, y = edge softness, z = brightness, w = alive flag.
 };
+
+StructuredBuffer<GpuParticle> Particles : register(t0);
+Texture2D<float4> SceneSpecularViewDepth : register(t1);
 
 struct VS_OUT
 {
     float3 position : POSITION;
     float size : TEXCOORD0;
     float4 color : COLOR0;
-    float4 params : TEXCOORD1;
+    float4 params : TEXCOORD1; // x = rotation, y = edge softness, z = normalized age, w = brightness.
+    float alive : TEXCOORD2;
 };
 
 struct GS_OUT
@@ -35,19 +39,37 @@ struct GS_OUT
     float viewDepth : TEXCOORD2;
 };
 
-VS_OUT VSMain(VS_IN input)
+VS_OUT VSMain(uint vertexId : SV_VertexID)
 {
+    GpuParticle particle = Particles[vertexId];
+
+    float lifetime = max(particle.VelocityLifetime.w, 0.001f);
+    float normalizedAge = saturate(particle.PositionAge.w / lifetime);
+    float size = lerp(particle.SizeRotation.x, particle.SizeRotation.y, normalizedAge);
+    float4 color = lerp(particle.StartColor, particle.EndColor, normalizedAge);
+    color.a *= saturate(particle.PositionAge.w / 0.06f);
+
     VS_OUT output;
-    output.position = input.position;
-    output.size = input.size;
-    output.color = input.color;
-    output.params = input.params;
+    output.position = particle.PositionAge.xyz;
+    output.size = size;
+    output.color = color;
+    output.params = float4(
+        particle.SizeRotation.z,
+        particle.ParticleParams.y,
+        normalizedAge,
+        particle.ParticleParams.z);
+    output.alive = particle.ParticleParams.w;
     return output;
 }
 
 [maxvertexcount(4)]
 void GSMain(point VS_OUT input[1], inout TriangleStream<GS_OUT> stream)
 {
+    if (input[0].alive < 0.5f || input[0].color.a <= 0.002f || input[0].size <= 0.0f)
+    {
+        return;
+    }
+
     float halfSize = input[0].size * 0.5f;
     float rotation = input[0].params.x;
     float sinRotation = sin(rotation);
@@ -119,7 +141,7 @@ float4 PSMain(GS_OUT input) : SV_Target
 
     float age = saturate(input.params.z);
     float brightness = input.params.w;
-    float glow = lerp(1.35f, 0.72f, age) * (0.65f + radial * 0.7f);
+    float glow = lerp(1.5f, 0.5f, age) * (0.7f + radial * 0.7f);
     float3 color = saturate(input.color.rgb * brightness * glow);
 
     return float4(color, alpha);

@@ -11,7 +11,7 @@ cbuffer DeferredLightingCB : register(b0)
     float4 SkyColor;                // rgb = background for pixels not written to the GBuffer.
     float4 TrailColor;              // rgb = emissive ground trail color.
     float4 LightCounts;             // x = point count, y = spot count, z = trail count.
-    float4 Padding;
+    float4 DebugFlags;              // x = show cascade color overlay.
 
     float4x4 LightViewProj[3];
 
@@ -31,7 +31,8 @@ Texture2D<float4> GBufferNormalShininess : register(t1);
 Texture2D<float4> GBufferSpecularViewDepth : register(t2);
 Texture2D<float4> GBufferWorldPosition : register(t3);
 Texture2D<float4> GBufferAmbient : register(t4);
-Texture2DArray ShadowMapArray : register(t5);
+Texture2D<uint> GBufferObjectId : register(t5);
+Texture2DArray ShadowMapArray : register(t6);
 
 SamplerState ShadowSampler : register(s1);
 
@@ -67,11 +68,10 @@ float SmoothRadialFalloff(float normalizedDistance)
     return x * x * (3.0f - 2.0f * x);
 }
 
-float SampleShadowPCF(int cascadeIdx, float2 shadowUV, float fragmentDepth)
+float SampleShadowPCF(int cascadeIdx, float2 shadowUV, float fragmentDepth, float bias)
 {
     float shadow = 0.0f;
     float texelSize = 1.0f / 2048.0f;
-    float bias = 0.0002f;
 
     [unroll]
     for (int dy = -1; dy <= 1; ++dy)
@@ -88,7 +88,7 @@ float SampleShadowPCF(int cascadeIdx, float2 shadowUV, float fragmentDepth)
     return shadow / 9.0f;
 }
 
-float ComputeShadowFactor(float3 worldPos, float3 normal, float viewDepth)
+int SelectCascadeIndex(float viewDepth)
 {
     int cascadeIndex = 2;
     if (viewDepth < CascadeSplits.x)
@@ -100,10 +100,38 @@ float ComputeShadowFactor(float3 worldPos, float3 normal, float viewDepth)
         cascadeIndex = 1;
     }
 
-    float offsetScale = lerp(0.005f, 0.05f, (float)cascadeIndex / 2.0f);
-    float3 offsetPos = worldPos + normal * offsetScale;
+    return cascadeIndex;
+}
 
-    float4 lightClip = mul(float4(offsetPos, 1.0f), LightViewProj[cascadeIndex]);
+float3 CascadeDebugColor(int cascadeIndex)
+{
+    if (cascadeIndex == 0)
+    {
+        return float3(1.0f, 0.5f, 0.5f);
+    }
+    if (cascadeIndex == 1)
+    {
+        return float3(0.5f, 1.0f, 0.5f);
+    }
+
+    return float3(0.5f, 0.5f, 1.0f);
+}
+
+float ComputeShadowBias(int cascadeIndex, float3 normal)
+{
+    float3 lightDir = normalize(DirectionalDirection.xyz);
+    float ndotl = saturate(dot(normalize(normal), lightDir));
+    float slope = 1.0f - ndotl;
+    float cascadeScale = (cascadeIndex == 0) ? 1.0f : ((cascadeIndex == 1) ? 2.0f : 4.0f);
+    return (0.00004f + slope * 0.00010f) * cascadeScale;
+}
+
+float ComputeShadowFactor(float3 worldPos, float3 normal, float viewDepth)
+{
+    int cascadeIndex = SelectCascadeIndex(viewDepth);
+    float bias = ComputeShadowBias(cascadeIndex, normal);
+
+    float4 lightClip = mul(float4(worldPos, 1.0f), LightViewProj[cascadeIndex]);
     float3 lightNDC = lightClip.xyz / lightClip.w;
 
     float2 shadowUV;
@@ -117,7 +145,7 @@ float ComputeShadowFactor(float3 worldPos, float3 normal, float viewDepth)
         return 1.0f;
     }
 
-    return SampleShadowPCF(cascadeIndex, shadowUV, lightNDC.z);
+    return SampleShadowPCF(cascadeIndex, shadowUV, lightNDC.z, bias);
 }
 
 float3 ComputePhongContribution(
@@ -296,6 +324,11 @@ float4 PSMain(PS_IN input) : SV_Target
     color += AccumulatePointLights(worldPos, normal, viewDir, albedo, specularColor, shininess);
     color += AccumulateSpotLights(worldPos, normal, viewDir, albedo, specularColor, shininess);
     color += TrailColor.rgb * ComputeTrailGlow(worldPos, normal, groundMask);
+
+    if (DebugFlags.x > 0.5f)
+    {
+        color *= CascadeDebugColor(SelectCascadeIndex(viewDepth));
+    }
 
     return float4(saturate(color), 1.0f);
 }

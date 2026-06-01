@@ -49,6 +49,11 @@ float4 PSMain(VS_OUT input) : SV_Target
     float depth = ShadowMapArray.SampleLevel(HudSampler, float3(input.uv, cascadeIndex), 0.0f).r;
     float validDepth = depth < 0.9999f ? 1.0f : 0.0f;
     float value = saturate((1.0f - depth) * exposure) * validDepth;
+    float2 texel = float2(1.0f / 2048.0f, 1.0f / 2048.0f);
+    float depthRight = ShadowMapArray.SampleLevel(HudSampler, float3(input.uv + float2(texel.x, 0.0f), cascadeIndex), 0.0f).r;
+    float depthDown = ShadowMapArray.SampleLevel(HudSampler, float3(input.uv + float2(0.0f, texel.y), cascadeIndex), 0.0f).r;
+    float depthEdge = max(abs(depth - depthRight), abs(depth - depthDown));
+    float edgeLine = smoothstep(0.00004f, 0.0015f, depthEdge) * validDepth;
 
     if (contourMode)
     {
@@ -62,6 +67,7 @@ float4 PSMain(VS_OUT input) : SV_Target
         input.uv.x < borderUv.x || input.uv.x > 1.0f - borderUv.x ||
         input.uv.y < borderUv.y || input.uv.y > 1.0f - borderUv.y;
 
-    float3 color = border ? BorderColor.rgb : float3(value, value, value);
+    float3 depthColor = lerp(float3(value, value, value), float3(0.0f, 0.0f, 0.0f), edgeLine);
+    float3 color = border ? BorderColor.rgb : depthColor;
     return float4(color, 1.0f);
 }

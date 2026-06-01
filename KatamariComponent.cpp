@@ -8,6 +8,7 @@
 #include <iostream>
 #include <algorithm>
 #include <cmath>
+#include <sstream>
 
 using namespace DirectX;
 using Microsoft::WRL::ComPtr;
@@ -21,15 +22,19 @@ static T Clamp(T val, T lo, T hi) {
 KatamariComponent::KatamariComponent(
     Game* owner,
     std::vector<ObjectDesc> descs,
+    std::vector<WaterfallDesc> waterfallDescs,
+    std::vector<FountainDesc> fountainDescs,
     std::wstring ballTex,
     std::wstring floorTex,
-    std::wstring shaderPath,
+    std::wstring lightShotVisualShaderPath,
     float sceneRad)
     : GameComponent(owner),
-    objectDescs(std::move(descs)),
-    ballTexPath(std::move(ballTex)),
-    floorTexPath(std::move(floorTex)),
-    shaderPath(std::move(shaderPath)),
+      objectDescs(std::move(descs)),
+      waterfallDescs(std::move(waterfallDescs)),
+      fountainDescs(std::move(fountainDescs)),
+      ballTexPath(std::move(ballTex)),
+      floorTexPath(std::move(floorTex)),
+      lightShotVisualShaderPath(std::move(lightShotVisualShaderPath)),
     sceneRadius(sceneRad)
 {
     XMStoreFloat4x4(&ballOrientMtx, XMMatrixIdentity());
@@ -37,7 +42,7 @@ KatamariComponent::KatamariComponent(
 
 void KatamariComponent::Initialize()
 {
-    CompileShaders();
+    CompileLightShotVisualShaders();
     CreateInputLayout();
     CreateConstantBuffer();
     CreateRasterizerState();
@@ -45,9 +50,19 @@ void KatamariComponent::Initialize()
     CreateBlendState();
     CreateSamplerState();
     renderingSystem.Initialize(game, game->Display->ClientWidth, game->Display->ClientHeight);
-    lightShotParticles.Initialize(lightShotParticleSettings);
-    particleRenderer.Initialize(game, lightShotParticleSettings.maxParticles);
-    particleDrawVertices.reserve(lightShotParticleSettings.maxParticles);
+    gBufferPicker.Initialize(game);
+    lightShotParticles.Initialize(game, lightShotParticleSettings);
+
+    size_t particleRendererCapacity = lightShotParticleSettings.maxParticles;
+    for (const WaterfallDesc& desc : waterfallDescs)
+    {
+        particleRendererCapacity = std::max(particleRendererCapacity, desc.particleSettings.maxParticles);
+    }
+    for (const FountainDesc& desc : fountainDescs)
+    {
+        particleRendererCapacity = std::max(particleRendererCapacity, desc.particleSettings.maxParticles);
+    }
+    particleRenderer.Initialize(game, particleRendererCapacity);
 
     CompileShadowShader();
     CreateShadowConstantBuffer();
@@ -61,6 +76,10 @@ void KatamariComponent::Initialize()
     BuildObjectMeshes();
     BuildFloorMesh();
     ScatterObjects();
+    ballPos = XMFLOAT3(0.0f, GetTerrainHeight(0.0f, 0.0f) + ballRadius * 0.9f, 0.0f);
+    previousBallPos = ballPos;
+    CreateWaterfalls();
+    CreateFountains();
 
     camera.Pitch = 0.4f;
     camera.Distance = ballRadius * 10.0f;
@@ -68,38 +87,38 @@ void KatamariComponent::Initialize()
         static_cast<float>(game->Display->ClientHeight);
 }
 
-void KatamariComponent::CompileShaders()
+void KatamariComponent::CompileLightShotVisualShaders()
 {
     ComPtr<ID3DBlob> errors;
     UINT flags = D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
 
     HRESULT hr = D3DCompileFromFile(
-        shaderPath.c_str(), nullptr, nullptr,
+        lightShotVisualShaderPath.c_str(), nullptr, nullptr,
         "VSMain", "vs_5_0", flags, 0,
         vsBytecode.GetAddressOf(), errors.GetAddressOf());
     if (FAILED(hr))
     {
-        if (errors) std::cerr << "[VS] " << (char*)errors->GetBufferPointer() << '\n';
-        throw std::runtime_error("Katamari: vertex shader compilation failed.");
+        if (errors) std::cerr << "[LightShotVisualVS] " << (char*)errors->GetBufferPointer() << '\n';
+        throw std::runtime_error("Katamari: light shot visual vertex shader compilation failed.");
     }
     hr = game->Device->CreateVertexShader(
         vsBytecode->GetBufferPointer(), vsBytecode->GetBufferSize(),
-        nullptr, vertexShader.GetAddressOf());
+        nullptr, lightShotVisualVertexShader.GetAddressOf());
     if (FAILED(hr)) throw std::runtime_error("CreateVertexShader failed.");
 
     ComPtr<ID3DBlob> psBytecode;
     hr = D3DCompileFromFile(
-        shaderPath.c_str(), nullptr, nullptr,
+        lightShotVisualShaderPath.c_str(), nullptr, nullptr,
         "PSMain", "ps_5_0", flags, 0,
         psBytecode.GetAddressOf(), errors.GetAddressOf());
     if (FAILED(hr))
     {
-        if (errors) std::cerr << "[PS] " << (char*)errors->GetBufferPointer() << '\n';
-        throw std::runtime_error("Katamari: pixel shader compilation failed.");
+        if (errors) std::cerr << "[LightShotVisualPS] " << (char*)errors->GetBufferPointer() << '\n';
+        throw std::runtime_error("Katamari: light shot visual pixel shader compilation failed.");
     }
     hr = game->Device->CreatePixelShader(
         psBytecode->GetBufferPointer(), psBytecode->GetBufferSize(),
-        nullptr, pixelShader.GetAddressOf());
+        nullptr, lightShotVisualPixelShader.GetAddressOf());
     if (FAILED(hr)) throw std::runtime_error("CreatePixelShader failed.");
 }
 
@@ -252,7 +271,7 @@ void KatamariComponent::BuildFloorMesh()
 
 void KatamariComponent::ScatterObjects()
 {
-    static const XMFLOAT4 kPalette[] =
+    const XMFLOAT4 kPalette[] =
     {
         XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f)
         //XMFLOAT4(1.0f, 0.35f, 0.35f, 1.0f),
@@ -277,6 +296,10 @@ void KatamariComponent::ScatterObjects()
             obj.scale = RandomFloat(desc.minScale, desc.maxScale);
             obj.worldRadius = obj.scale * mesh->BoundingRadius();
             obj.color = kPalette[ci++ % pal];
+            obj.objectId = kFirstSceneObjectId + static_cast<uint32_t>(objects.size());
+            obj.debugName =
+                "ObjectDesc[" + std::to_string(di) + "] instance " + std::to_string(i);
+            obj.sourceMeshPath = desc.objPath;
 
             obj.material = desc.material;
 
@@ -315,18 +338,107 @@ void KatamariComponent::ScatterObjects()
     }
 }
 
+void KatamariComponent::CreateWaterfalls()
+{
+    waterfalls.clear();
+    waterfalls.reserve(waterfallDescs.size());
+
+    for (const WaterfallDesc& desc : waterfallDescs)
+    {
+        waterfalls.emplace_back();
+        ActiveWaterfall& waterfall = waterfalls.back();
+        waterfall.desc = desc;
+        waterfall.topCenter = desc.position;
+        waterfall.widthAxis = XMFLOAT3(std::cos(desc.emitterYaw), 0.0f, std::sin(desc.emitterYaw));
+        waterfall.depthAxis = XMFLOAT3(-std::sin(desc.emitterYaw), 0.0f, std::cos(desc.emitterYaw));
+        waterfall.emissionAccumulator = 0.0f;
+
+        if (desc.anchorToTerrain)
+        {
+            waterfall.topCenter.y = GetTerrainHeight(desc.position.x, desc.position.z) + desc.heightAboveTerrain;
+        }
+
+        waterfall.particles.Initialize(game, desc.particleSettings);
+    }
+}
+
+void KatamariComponent::CreateFountains()
+{
+    fountains.clear();
+    fountains.reserve(fountainDescs.size());
+
+    for (const FountainDesc& desc : fountainDescs)
+    {
+        fountains.emplace_back();
+        ActiveFountain& fountain = fountains.back();
+        fountain.desc = desc;
+        fountain.emitterCenter = desc.position;
+        fountain.widthAxis = XMFLOAT3(std::cos(desc.emitterYaw), 0.0f, std::sin(desc.emitterYaw));
+        fountain.depthAxis = XMFLOAT3(-std::sin(desc.emitterYaw), 0.0f, std::cos(desc.emitterYaw));
+        fountain.emissionAccumulator = 0.0f;
+
+        if (desc.anchorToTerrain)
+        {
+            fountain.emitterCenter.y = GetTerrainHeight(desc.position.x, desc.position.z) + desc.heightOffset;
+        }
+
+        fountain.particles.Initialize(game, desc.particleSettings);
+    }
+}
+
 void KatamariComponent::Update(float dt)
 {
-    UpdateBallPhysics(dt);
-    UpdateLightShots(dt);  // Handles Space shooting, projectile motion, and trail aging
-    lightShotParticles.Update(dt);
+    UpdatePauseInput();
+    UpdateMouseCameraAndPicking(dt);
     UpdateShadowHudInput(dt);
-    CheckAbsorption();
 
+    if (gamePaused)
+    {
+        ApplyCameraFrameState();
+        return;
+    }
+
+    XMFLOAT3 oldBallPos = ballPos;
+    UpdateBallPhysics(dt);
+    float velocityDt = std::max(dt, 0.001f);
+    XMFLOAT3 ballVelocity(
+        (ballPos.x - oldBallPos.x) / velocityDt,
+        (ballPos.y - oldBallPos.y) / velocityDt,
+        (ballPos.z - oldBallPos.z) / velocityDt);
+
+    UpdateLightShots(dt);  // Handles Space shooting, projectile motion, and trail aging
+    UpdateLightShotParticles(dt);
+    UpdateWaterfalls(dt, ballVelocity);
+    UpdateFountains(dt, ballVelocity);
+    CheckAbsorption();
+    previousBallPos = ballPos;
+
+    ApplyCameraFrameState();
+}
+
+void KatamariComponent::ApplyCameraFrameState()
+{
     camera.Yaw = cameraYaw;
     camera.Distance = ballRadius * 8.0f;
     camera.AspectRatio = static_cast<float>(game->Display->ClientWidth) /
         static_cast<float>(game->Display->ClientHeight);
+}
+
+void KatamariComponent::UpdatePauseInput()
+{
+    auto* input = game->Input.get();
+    if (!input)
+    {
+        return;
+    }
+
+    bool pauseDown = input->IsKeyDown('P');
+    if (pauseDown && !pauseToggleHeld)
+    {
+        gamePaused = !gamePaused;
+        std::cout << "[Pause] " << (gamePaused ? "paused" : "resumed") << '\n';
+    }
+    pauseToggleHeld = pauseDown;
 }
 
 void KatamariComponent::UpdateBallPhysics(float dt)
@@ -493,6 +605,147 @@ void KatamariComponent::UpdateLightShots(float dt)
         lightShots.end());
 }
 
+void KatamariComponent::UpdateLightShotParticles(float dt)
+{
+    if (!lightShotSettings.particleSdfEnabled)
+    {
+        lightShotParticles.Update(dt);
+        return;
+    }
+
+    std::vector<ParticleSdfSphere> sdfSpheres;
+    sdfSpheres.reserve(std::min(lightShots.size(), static_cast<size_t>(kMaxParticleSdfSpheres)));
+
+    for (const ActiveLightShot& shot : lightShots)
+    {
+        if (sdfSpheres.size() >= static_cast<size_t>(kMaxParticleSdfSpheres))
+        {
+            break;
+        }
+
+        if (shot.age >= lightShotSettings.lifetime)
+        {
+            continue;
+        }
+
+        XMVECTOR direction = XMVector3Normalize(XMLoadFloat3(&shot.direction));
+        XMFLOAT3 shotVelocity;
+        XMStoreFloat3(&shotVelocity, XMVectorScale(direction, lightShotSettings.speed));
+
+        ParticleSdfSphere sdf;
+        sdf.center = shot.position;
+        sdf.radius = lightShotSettings.particleSdfRadius;
+        sdf.velocity = shotVelocity;
+        sdf.influenceDistance = lightShotSettings.particleSdfInfluenceDistance;
+        sdf.repelStrength = lightShotSettings.particleSdfRepelStrength;
+        sdf.surfaceOffset = lightShotSettings.particleSdfSurfaceOffset;
+        sdf.velocityTransfer = lightShotSettings.particleSdfVelocityTransfer;
+        sdf.enabled = 1.0f;
+        sdfSpheres.push_back(sdf);
+    }
+
+    lightShotParticles.Update(dt, sdfSpheres);
+}
+
+void KatamariComponent::UpdateWaterfalls(float dt, const XMFLOAT3& ballVelocity)
+{
+    for (ActiveWaterfall& waterfall : waterfalls)
+    {
+        WaterfallDesc& desc = waterfall.desc;
+        waterfall.emissionAccumulator += desc.emissionRate * std::max(0.0f, dt);
+        int emitCount = static_cast<int>(waterfall.emissionAccumulator);
+        waterfall.emissionAccumulator -= static_cast<float>(emitCount);
+        emitCount = std::min(emitCount, std::max(0, desc.maxEmitPerFrame));
+
+        waterfall.particles.EmitBoxBurst(
+            waterfall.topCenter,
+            waterfall.widthAxis,
+            waterfall.depthAxis,
+            desc.width,
+            desc.depth,
+            desc.flowDirection,
+            emitCount);
+
+        ParticleSdfSphere ballSdf;
+        ballSdf.center = ballPos;
+        ballSdf.radius = ballRadius;
+        ballSdf.velocity = ballVelocity;
+        ballSdf.influenceDistance = desc.sdfSettings.influenceDistance;
+        ballSdf.repelStrength = desc.sdfSettings.repelStrength;
+        ballSdf.surfaceOffset = desc.sdfSettings.surfaceOffset;
+        ballSdf.velocityTransfer = desc.sdfSettings.velocityTransfer;
+        ballSdf.enabled = desc.sdfSettings.enabled ? 1.0f : 0.0f;
+
+        waterfall.particles.Update(dt, ballSdf);
+    }
+}
+
+void KatamariComponent::UpdateFountains(float dt, const XMFLOAT3& ballVelocity)
+{
+    for (ActiveFountain& fountain : fountains)
+    {
+        FountainDesc& desc = fountain.desc;
+        fountain.emissionAccumulator += desc.emissionRate * std::max(0.0f, dt);
+        int emitCount = static_cast<int>(fountain.emissionAccumulator);
+        fountain.emissionAccumulator -= static_cast<float>(emitCount);
+        emitCount = std::min(emitCount, std::max(0, desc.maxEmitPerFrame));
+
+        fountain.particles.EmitBoxBurst(
+            fountain.emitterCenter,
+            fountain.widthAxis,
+            fountain.depthAxis,
+            desc.width,
+            desc.depth,
+            desc.flowDirection,
+            emitCount);
+
+        ParticleSdfSphere ballSdf;
+        ballSdf.center = ballPos;
+        ballSdf.radius = ballRadius;
+        ballSdf.velocity = ballVelocity;
+        ballSdf.influenceDistance = desc.sdfSettings.influenceDistance;
+        ballSdf.repelStrength = desc.sdfSettings.repelStrength;
+        ballSdf.surfaceOffset = desc.sdfSettings.surfaceOffset;
+        ballSdf.velocityTransfer = desc.sdfSettings.velocityTransfer;
+        ballSdf.enabled = desc.sdfSettings.enabled ? 1.0f : 0.0f;
+
+        fountain.particles.Update(dt, ballSdf);
+    }
+}
+
+void KatamariComponent::UpdateMouseCameraAndPicking(float dt)
+{
+    (void)dt;
+    auto* input = game->Input.get();
+    if (!input)
+    {
+        return;
+    }
+
+    if (input->IsRightMouseDown())
+    {
+        DirectX::SimpleMath::Vector2 mouseDelta = input->GetMouseOffset();
+        cameraYaw += mouseDelta.x * 0.004f;
+        camera.Pitch = Clamp(camera.Pitch - mouseDelta.y * 0.003f, -0.2f, 1.2f);
+    }
+
+    if (input->WasLeftMousePressed())
+    {
+        DirectX::SimpleMath::Vector2 mousePosition = input->GetMousePosition();
+        int x = static_cast<int>(mousePosition.x);
+        int y = static_cast<int>(mousePosition.y);
+
+        if (x >= 0 && y >= 0 &&
+            x < game->Display->ClientWidth &&
+            y < game->Display->ClientHeight)
+        {
+            pendingPickX = static_cast<uint32_t>(x);
+            pendingPickY = static_cast<uint32_t>(y);
+            pendingGBufferPick = true;
+        }
+    }
+}
+
 void KatamariComponent::SpawnLightShot()
 {
     if (lightShotSettings.lifetime <= 0.0f || lightShotSettings.intensity <= 0.0f)
@@ -610,6 +863,13 @@ void KatamariComponent::Draw()
 
     renderingSystem.EndGeometryPass();
 
+    const GBuffer& currentGBuffer = renderingSystem.GetGBuffer();
+    ExecutePendingGBufferPick(
+        static_cast<uint32_t>(currentGBuffer.Width()),
+        static_cast<uint32_t>(currentGBuffer.Height()),
+        view,
+        proj);
+
     DeferredLightingData lightingData = BuildDeferredLightingData(camPos);
     renderingSystem.RenderLighting(
         lightingData,
@@ -628,7 +888,7 @@ void KatamariComponent::Draw()
     mainVp.MaxDepth = 1.0f;
     ctx->RSSetViewports(1, &mainVp);
 
-    ApplyForwardPipeline();
+    ApplyLightShotVisualPipeline();
     DrawLightShots(view, proj, camPos);
     DrawParticles(view, proj, camPos, width, height);
 
@@ -661,6 +921,13 @@ void KatamariComponent::UpdateShadowHudInput(float dt)
     }
     shadowHudInvertToggleHeld = f2Down;
 
+    bool cascadeColorDown = input->IsKeyDown('C');
+    if (cascadeColorDown && !cascadeColorDebugToggleHeld)
+    {
+        cascadeColorDebugEnabled = !cascadeColorDebugEnabled;
+    }
+    cascadeColorDebugToggleHeld = cascadeColorDown;
+
     if (input->IsKeyDown(VK_OEM_PERIOD))
     {
         shadowMapHud.Exposure = std::min(64.0f, shadowMapHud.Exposure + 12.0f * dt);
@@ -673,7 +940,7 @@ void KatamariComponent::UpdateShadowHudInput(float dt)
 
 void KatamariComponent::SetConstantBuffer(
     const XMMATRIX& world, const XMMATRIX& view, const XMMATRIX& projection,
-    const Material& material, const XMFLOAT3& camPos, float groundTrailMask, float lightShotEmissive)
+    const Material& material, const XMFLOAT3& camPos, uint32_t objectId, float groundTrailMask, float lightShotEmissive)
 {
     D3D11_MAPPED_SUBRESOURCE mapped;
     if (FAILED(game->Context->Map(constantBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
@@ -693,6 +960,7 @@ void KatamariComponent::SetConstantBuffer(
     cb->MaterialDiffuseColor = material.Diffuse;
     cb->MaterialSpecularColor = material.Specular;
     cb->MaterialShininess = material.Shininess;
+    cb->ObjectId = objectId;
 
 	//upload cascades and split depths for shadow mapping
     for (int i = 0; i < kCascadeCount; ++i)
@@ -765,7 +1033,7 @@ void KatamariComponent::FillLightShotConstants(PerObjectCB* cb, float groundTrai
 
 void KatamariComponent::DrawBall(const XMMATRIX& v, const XMMATRIX& p, const XMFLOAT3& cam)
 {
-    SetConstantBuffer(BallWorldMatrix(), v, p, ballMaterial, cam);
+    SetConstantBuffer(BallWorldMatrix(), v, p, ballMaterial, cam, kBallObjectId);
 
     ID3D11ShaderResourceView* srv = ballMesh->GetTexture();
     game->Context->PSSetShaderResources(0, 1, &srv);
@@ -777,7 +1045,7 @@ void KatamariComponent::DrawBall(const XMMATRIX& v, const XMMATRIX& p, const XMF
 void KatamariComponent::DrawFreeObject(const SceneObject& obj,
     const XMMATRIX& v, const XMMATRIX& p, const XMFLOAT3& cam)
 {
-    SetConstantBuffer(FreeObjectWorldMatrix(obj), v, p, obj.material, cam);
+    SetConstantBuffer(FreeObjectWorldMatrix(obj), v, p, obj.material, cam, obj.objectId);
 
     ID3D11ShaderResourceView* srv = obj.mesh->GetTexture();
     game->Context->PSSetShaderResources(0, 1, &srv);
@@ -789,7 +1057,7 @@ void KatamariComponent::DrawFreeObject(const SceneObject& obj,
 void KatamariComponent::DrawStuckObject(const SceneObject& obj,
     const XMMATRIX& v, const XMMATRIX& p, const XMFLOAT3& cam)
 {
-    SetConstantBuffer(StuckObjectWorldMatrix(obj), v, p, obj.material, cam);
+    SetConstantBuffer(StuckObjectWorldMatrix(obj), v, p, obj.material, cam, obj.objectId);
 
     ID3D11ShaderResourceView* srv = obj.mesh->GetTexture();
     game->Context->PSSetShaderResources(0, 1, &srv);
@@ -800,7 +1068,7 @@ void KatamariComponent::DrawStuckObject(const SceneObject& obj,
 
 void KatamariComponent::DrawFloor(const XMMATRIX& v, const XMMATRIX& p, const XMFLOAT3& cam)
 {
-    SetConstantBuffer(XMMatrixIdentity(), v, p, floorMaterial, cam, 1.0f);    //Enable trail glow on terrain
+    SetConstantBuffer(XMMatrixIdentity(), v, p, floorMaterial, cam, kFloorObjectId, 1.0f);    //Enable trail glow on terrain
 
     ID3D11ShaderResourceView* srv = floorMesh->GetTexture();
     game->Context->PSSetShaderResources(0, 1, &srv);
@@ -830,7 +1098,7 @@ void KatamariComponent::DrawLightShots(const XMMATRIX& v, const XMMATRIX& p, con
             XMMatrixScaling(radius, radius, radius) *
             XMMatrixTranslation(shot.position.x, shot.position.y, shot.position.z);    //Place sphere at projectile center
 
-        SetConstantBuffer(world, v, p, glowMaterial, cam, 0.0f, lightShotSettings.visualIntensity * fade);
+        SetConstantBuffer(world, v, p, glowMaterial, cam, kInvalidObjectId, 0.0f, lightShotSettings.visualIntensity * fade);
 
         ballMesh->Draw(game->Context.Get());
     }
@@ -838,14 +1106,35 @@ void KatamariComponent::DrawLightShots(const XMMATRIX& v, const XMMATRIX& p, con
 
 void KatamariComponent::DrawParticles(const XMMATRIX& v, const XMMATRIX& p, const XMFLOAT3& cam, int width, int height)
 {
-    if (lightShotParticles.AliveCount() == 0)
+    (void)cam;
+    for (const ActiveWaterfall& waterfall : waterfalls)
     {
-        return;
+        particleRenderer.Draw(
+            waterfall.particles,
+            v,
+            p,
+            game->RenderView.Get(),
+            game->DepthView.Get(),
+            renderingSystem.GetGBuffer().GetShaderResourceView(GBuffer::SpecularViewDepth),
+            width,
+            height);
     }
 
-    lightShotParticles.BuildVertices(cam, particleDrawVertices);
+    for (const ActiveFountain& fountain : fountains)
+    {
+        particleRenderer.Draw(
+            fountain.particles,
+            v,
+            p,
+            game->RenderView.Get(),
+            game->DepthView.Get(),
+            renderingSystem.GetGBuffer().GetShaderResourceView(GBuffer::SpecularViewDepth),
+            width,
+            height);
+    }
+
     particleRenderer.Draw(
-        particleDrawVertices,
+        lightShotParticles,
         v,
         p,
         game->RenderView.Get(),
@@ -855,7 +1144,7 @@ void KatamariComponent::DrawParticles(const XMMATRIX& v, const XMMATRIX& p, cons
         height);
 }
 
-void KatamariComponent::ApplyForwardPipeline()
+void KatamariComponent::ApplyLightShotVisualPipeline()
 {
     auto* ctx = game->Context.Get();
 
@@ -870,8 +1159,8 @@ void KatamariComponent::ApplyForwardPipeline()
 
     ctx->RSSetState(rastState.Get());
     ctx->IASetInputLayout(inputLayout.Get());
-    ctx->VSSetShader(vertexShader.Get(), nullptr, 0);
-    ctx->PSSetShader(pixelShader.Get(), nullptr, 0);
+    ctx->VSSetShader(lightShotVisualVertexShader.Get(), nullptr, 0);
+    ctx->PSSetShader(lightShotVisualPixelShader.Get(), nullptr, 0);
     ctx->GSSetShader(nullptr, nullptr, 0);
     ctx->VSSetConstantBuffers(0, 1, constantBuffer.GetAddressOf());
     ctx->PSSetConstantBuffers(0, 1, constantBuffer.GetAddressOf());
@@ -889,6 +1178,7 @@ DeferredLightingData KatamariComponent::BuildDeferredLightingData(const XMFLOAT3
         lightShotSettings.color.y,
         lightShotSettings.color.z,
         1.0f);
+    data.DebugFlags = XMFLOAT4(cascadeColorDebugEnabled ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
 
     for (int i = 0; i < kCascadeCount; ++i)
     {
@@ -955,6 +1245,133 @@ DeferredLightingData KatamariComponent::BuildDeferredLightingData(const XMFLOAT3
     }
 
     return data;
+}
+
+void KatamariComponent::ExecutePendingGBufferPick(uint32_t width, uint32_t height, const XMMATRIX& view, const XMMATRIX& projection)
+{
+    if (!pendingGBufferPick)
+    {
+        return;
+    }
+
+    pendingGBufferPick = false;
+
+    GBufferPickResult result;
+    bool valid = gBufferPicker.Pick(
+        renderingSystem.GetGBuffer(),
+        pendingPickX,
+        pendingPickY,
+        width,
+        height,
+        result);
+
+    if (!valid)
+    {
+        std::cout << "[GBufferPick] pixel=("
+            << pendingPickX << ", " << pendingPickY
+            << ") invalid\n";
+        return;
+    }
+
+    std::cout << "[GBufferPick] pixel=("
+        << result.PixelX << ", " << result.PixelY
+        << ") objectId=" << result.ObjectId
+        << " object=\"" << DescribeObjectId(result.ObjectId) << "\""
+        << " world=("
+        << result.WorldPosition.x << ", "
+        << result.WorldPosition.y << ", "
+        << result.WorldPosition.z << ") normal=("
+        << result.Normal.x << ", "
+        << result.Normal.y << ", "
+        << result.Normal.z << ") viewDepth="
+        << result.ViewDepth << '\n';
+
+    XMVECTOR pickedWorld = XMLoadFloat3(&result.WorldPosition);
+    XMMATRIX viewProjection = view * projection;
+    XMVECTOR projected = XMVector3TransformCoord(pickedWorld, viewProjection);
+
+    float ndcX = XMVectorGetX(projected);
+    float ndcY = XMVectorGetY(projected);
+    float screenX = (ndcX * 0.5f + 0.5f) * static_cast<float>(width);
+    float screenY = (-ndcY * 0.5f + 0.5f) * static_cast<float>(height);
+    float clickCenterX = static_cast<float>(result.PixelX) + 0.5f;
+    float clickCenterY = static_cast<float>(result.PixelY) + 0.5f;
+    float dx = screenX - clickCenterX;
+    float dy = screenY - clickCenterY;
+    float projectionError = std::sqrt(dx * dx + dy * dy);
+    bool projectionOk = projectionError <= 3.0f;
+
+    std::cout << "[GBufferPickCheck] projectionPxError="
+        << projectionError
+        << " projectedPixel=(" << screenX << ", " << screenY << ")"
+        << " status=" << (projectionOk ? "OK" : "WARN")
+        << '\n';
+
+    if (result.ObjectId == kFloorObjectId)
+    {
+        float expectedHeight = GetTerrainHeight(result.WorldPosition.x, result.WorldPosition.z);
+        float heightError = std::abs(result.WorldPosition.y - expectedHeight);
+        XMVECTOR pickedNormal = XMVector3Normalize(XMLoadFloat3(&result.Normal));
+        XMVECTOR expectedNormal = GetTerrainNormal(result.WorldPosition.x, result.WorldPosition.z);
+        float normalDot = XMVectorGetX(XMVector3Dot(pickedNormal, expectedNormal));
+        bool terrainOk = heightError <= 0.15f && normalDot >= 0.90f;
+
+        std::cout << "[GBufferPickCheck] terrain heightError="
+            << heightError
+            << " normalDot=" << normalDot
+            << " status=" << (terrainOk ? "OK" : "WARN")
+            << '\n';
+    }
+    else if (result.ObjectId == kBallObjectId)
+    {
+        XMVECTOR ballCenter = XMLoadFloat3(&ballPos);
+        XMVECTOR toPickedPoint = pickedWorld - ballCenter;
+        float distanceFromCenter = XMVectorGetX(XMVector3Length(toPickedPoint));
+        float radiusError = std::abs(distanceFromCenter - ballRadius);
+
+        XMVECTOR expectedNormal = distanceFromCenter > 0.0001f
+            ? XMVectorScale(toPickedPoint, 1.0f / distanceFromCenter)
+            : XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
+        XMVECTOR pickedNormal = XMVector3Normalize(XMLoadFloat3(&result.Normal));
+        float normalDot = XMVectorGetX(XMVector3Dot(pickedNormal, expectedNormal));
+        bool ballOk = radiusError <= 0.08f && normalDot >= 0.90f;
+
+        std::cout << "[GBufferPickCheck] ball radiusError="
+            << radiusError
+            << " normalDot=" << normalDot
+            << " status=" << (ballOk ? "OK" : "WARN")
+            << '\n';
+    }
+}
+
+std::string KatamariComponent::DescribeObjectId(uint32_t objectId) const
+{
+    if (objectId == kInvalidObjectId)
+    {
+        return "Invalid / Sky";
+    }
+
+    if (objectId == kFloorObjectId)
+    {
+        return "Floor / Terrain";
+    }
+
+    if (objectId == kBallObjectId)
+    {
+        return "Katamari Ball";
+    }
+
+    for (const SceneObject& obj : objects)
+    {
+        if (obj.objectId == objectId)
+        {
+            std::ostringstream stream;
+            stream << obj.debugName << " mesh=" << obj.sourceMeshPath;
+            return stream.str();
+        }
+    }
+
+    return "Unknown Object";
 }
 
 XMMATRIX KatamariComponent::BallWorldMatrix() const
@@ -1064,9 +1481,9 @@ void KatamariComponent::CreateShadowCascadeBuffer()
 void KatamariComponent::CreateShadowRasterizerState()
 {
     CD3D11_RASTERIZER_DESC desc(D3D11_DEFAULT);
-    desc.CullMode = D3D11_CULL_FRONT;
-    desc.DepthBias = 1000;
-    desc.SlopeScaledDepthBias = 1.0f;
+    desc.CullMode = D3D11_CULL_NONE;
+    desc.DepthBias = 0;
+    desc.SlopeScaledDepthBias = 0.0f;
     desc.DepthBiasClamp = 0.0f;
     if (FAILED(game->Device->CreateRasterizerState(&desc, shadowRastState.GetAddressOf())))
     {
@@ -1151,10 +1568,10 @@ void KatamariComponent::DrawSceneForShadow()
 
             mesh->Bind(ctx);
             mesh->Draw(ctx);
-        };
+    };
 
     drawMesh(BallWorldMatrix(), ballMesh.get());
-    drawMesh(XMMatrixIdentity(), floorMesh.get());
+    // The terrain receives shadows, but writing it into the shadow map causes self-shadowing.
 
     for (const auto& obj : objects)
     {
@@ -1166,8 +1583,17 @@ void KatamariComponent::DrawSceneForShadow()
 }
 void KatamariComponent::DestroyResources()
 {
+    gBufferPicker.DestroyResources();
     particleRenderer.DestroyResources();
-    lightShotParticles.Clear();
+    lightShotParticles.DestroyResources();
+    for (ActiveWaterfall& waterfall : waterfalls)
+    {
+        waterfall.particles.DestroyResources();
+    }
+    for (ActiveFountain& fountain : fountains)
+    {
+        fountain.particles.DestroyResources();
+    }
     renderingSystem.DestroyResources();
     shadowMapHud.DestroyResources();
     shadowRastState.Reset();
@@ -1181,12 +1607,13 @@ void KatamariComponent::DestroyResources()
     blendState.Reset();
     constantBuffer.Reset();
     inputLayout.Reset();
-    pixelShader.Reset();
-    vertexShader.Reset();
+    lightShotVisualPixelShader.Reset();
+    lightShotVisualVertexShader.Reset();
     vsBytecode.Reset();
     lightShots.clear();
     lightTrailStamps.clear();
-    particleDrawVertices.clear();
+    waterfalls.clear();
+    fountains.clear();
     objects.clear();
     meshPool.clear();
     ballMesh.reset();

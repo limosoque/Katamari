@@ -6,7 +6,6 @@
 #include <d3dcompiler.h>
 #include <d3d11.h>
 #include <string>
-#include <vector>
 #include <wrl/client.h>
 
 class Game;
@@ -18,7 +17,7 @@ public:
 
     void Initialize(Game* owner, size_t maxParticles);
     void Draw(
-        const std::vector<ParticleVertex>& particles,
+        const ParticleSystem& particles,
         const DirectX::XMMATRIX& view,
         const DirectX::XMMATRIX& projection,
         ID3D11RenderTargetView* outputTarget,
@@ -47,15 +46,12 @@ private:
     Microsoft::WRL::ComPtr<ID3D11VertexShader> vertexShader;
     Microsoft::WRL::ComPtr<ID3D11GeometryShader> geometryShader;
     Microsoft::WRL::ComPtr<ID3D11PixelShader> pixelShader;
-    Microsoft::WRL::ComPtr<ID3D11InputLayout> inputLayout;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> vertexBuffer;
     Microsoft::WRL::ComPtr<ID3D11Buffer> constantBuffer;
     Microsoft::WRL::ComPtr<ID3D11BlendState> blendState;
     Microsoft::WRL::ComPtr<ID3D11DepthStencilState> depthReadState;
     Microsoft::WRL::ComPtr<ID3D11RasterizerState> rasterizerState;
 
     void CompileShaders();
-    void CreateInputLayout(ID3DBlob* vertexShaderBytecode);
     void CreateBuffers();
     void CreateStates();
     void UpdateFrameConstants(

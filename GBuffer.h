@@ -6,7 +6,7 @@
 
 class Game;
 
-static constexpr unsigned int kGBufferTargetCount = 5;
+const unsigned int kGBufferTargetCount = 6;
 
 class GBuffer
 {
@@ -17,7 +17,8 @@ public:
         NormalShininess = 1,
         SpecularViewDepth = 2,
         WorldPosition = 3,
-        Ambient = 4
+        Ambient = 4,
+        ObjectId = 5
     };
 
     void Initialize(Game* owner, int width, int height);
@@ -46,7 +47,8 @@ private:
         DXGI_FORMAT_R16G16B16A16_FLOAT,
         DXGI_FORMAT_R16G16B16A16_FLOAT,
         DXGI_FORMAT_R32G32B32A32_FLOAT,
-        DXGI_FORMAT_R8G8B8A8_UNORM
+        DXGI_FORMAT_R8G8B8A8_UNORM,
+        DXGI_FORMAT_R32_UINT
     };
 
     std::array<Microsoft::WRL::ComPtr<ID3D11Texture2D>, kGBufferTargetCount> textures;

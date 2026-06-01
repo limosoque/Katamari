@@ -71,6 +71,7 @@ private:
     void RegisterRawInput();   // registers keyboard + mouse as Raw Input devices
     void PrepareResources();
     void CreateBackBuffer();
+    void ResizeBackBuffer(int width, int height);
     void PrepareFrame();
     void UpdateInternal(float dt);
     void Draw();

@@ -4,6 +4,7 @@
 #include "DisplayWin32.h"
 #include "InputDevice.h"
 #include "GameComponent.h"
+#include <algorithm>
 #include <stdexcept>
 #include <iostream>
 #include <vector>
@@ -129,6 +130,50 @@ void Game::CreateBackBuffer()
 
     hr = Device->CreateDepthStencilView(depthTex.Get(), nullptr, DepthView.GetAddressOf());
     if (FAILED(hr)) throw std::runtime_error("CreateDepthStencilView failed.");
+}
+
+void Game::ResizeBackBuffer(int width, int height)
+{
+    width = std::max(1, width);
+    height = std::max(1, height);
+
+    if (screenWidth == width && screenHeight == height && RenderView && DepthView)
+    {
+        return;
+    }
+
+    screenWidth = width;
+    screenHeight = height;
+    if (Display)
+    {
+        Display->ClientWidth = width;
+        Display->ClientHeight = height;
+    }
+
+    if (!SwapChain || !Device || !Context)
+    {
+        return;
+    }
+
+    Context->ClearState();
+    Context->OMSetRenderTargets(0, nullptr, nullptr);
+    RenderView.Reset();
+    DepthView.Reset();
+    Context->Flush();
+
+    HRESULT hr = SwapChain->ResizeBuffers(
+        0,
+        static_cast<UINT>(screenWidth),
+        static_cast<UINT>(screenHeight),
+        DXGI_FORMAT_UNKNOWN,
+        DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH);
+    if (FAILED(hr))
+    {
+        throw std::runtime_error("ResizeBuffers failed.");
+    }
+
+    CreateBackBuffer();
+    ScreenResized = true;
 }
 
 void Game::RestoreTargets()
@@ -258,7 +303,23 @@ void Game::DestroyResources()
 LRESULT CALLBACK Game::MessageHandler(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     Game* game = reinterpret_cast<Game*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
-    if (!game || !game->Input) return 0;
+    if (!game) return 0;
+
+    if (msg == WM_SIZE)
+    {
+        if (wp != SIZE_MINIMIZED)
+        {
+            const int width = static_cast<int>(LOWORD(lp));
+            const int height = static_cast<int>(HIWORD(lp));
+            if (width > 0 && height > 0)
+            {
+                game->ResizeBackBuffer(width, height);
+            }
+        }
+        return 0;
+    }
+
+    if (!game->Input) return 0;
 
     if (msg != WM_INPUT) return 0;
 

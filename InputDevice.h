@@ -34,6 +34,10 @@ private:
 
     DirectX::SimpleMath::Vector2 MousePosition;
     DirectX::SimpleMath::Vector2 MouseOffset;
+    bool leftMouseDown = false;
+    bool rightMouseDown = false;
+    bool leftMousePressed = false;
+    bool rightMousePressed = false;
 
 public:
     InputDevice(Game* inGame);
@@ -42,6 +46,10 @@ public:
     void RemovePressedKey(unsigned int keyCode);
 
     bool IsKeyDown(unsigned int keyCode) const;
+    bool IsLeftMouseDown() const { return leftMouseDown; }
+    bool IsRightMouseDown() const { return rightMouseDown; }
+    bool WasLeftMousePressed() const { return leftMousePressed; }
+    bool WasRightMousePressed() const { return rightMousePressed; }
 
     void OnKeyDown(RAWKEYBOARD data);
     void OnMouseMove(RAWMOUSE data);
@@ -51,5 +59,7 @@ public:
 
     void ResetMouseOffset() {
         MouseOffset = DirectX::SimpleMath::Vector2(0.f, 0.f); 
+        leftMousePressed = false;
+        rightMousePressed = false;
     }
 };

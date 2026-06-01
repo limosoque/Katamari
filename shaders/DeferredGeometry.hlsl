@@ -12,7 +12,8 @@ cbuffer PerObject : register(b0)
     float4 MaterialSpecularColor;
 
     float MaterialShininess;
-    float3 Padding;
+    uint ObjectId;
+    float2 Padding;
 
     float4 SunlightColor;
     float4 SunlightDirection;
@@ -53,6 +54,7 @@ struct GBufferOutput
     float4 SpecularViewDepth : SV_Target2;
     float4 WorldPosition : SV_Target3;
     float4 Ambient : SV_Target4;
+    uint ObjectId : SV_Target5;
 };
 
 PS_IN VSMain(VS_IN input)
@@ -85,6 +87,7 @@ GBufferOutput PSMain(PS_IN input)
     output.SpecularViewDepth = float4(MaterialSpecularColor.rgb, input.viewDepth);
     output.WorldPosition = float4(input.posW, 1.0f);
     output.Ambient = float4(MaterialAmbientColor.rgb, 1.0f);
+    output.ObjectId = ObjectId;
 
     return output;
 }

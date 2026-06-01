@@ -11,6 +11,7 @@
 #include "RenderingSystem.h"
 #include "ParticleSystem.h"
 #include "ParticleRenderer.h"
+#include "GBufferPicker.h"
 
 #include <d3d11.h>
 #include <d3dcompiler.h>
@@ -21,9 +22,15 @@
 #include <string>
 #include <memory>
 #include <random>
+#include <cstdint>
+#include <utility>
 
-static constexpr int kMaxShotLights = 8; //Max active shot lights sent to the shader
-static constexpr int kMaxShotTrailStamps = 64; //Max active trail stamps sent to the shader
+const int kMaxShotLights = 8; //Max active shot lights sent to the shader
+const int kMaxShotTrailStamps = 64; //Max active trail stamps sent to the shader
+const uint32_t kInvalidObjectId = 0;
+const uint32_t kFloorObjectId = 1;
+const uint32_t kBallObjectId = 2;
+const uint32_t kFirstSceneObjectId = 100;
 
 struct alignas(16) PerObjectCB
 {
@@ -36,7 +43,8 @@ struct alignas(16) PerObjectCB
 	DirectX::XMFLOAT4 MaterialSpecularColor;
 	
     float MaterialShininess;
-    float Padding[3];
+    uint32_t ObjectId;
+    float Padding[2];
 
     DirectX::XMFLOAT4 SunlightColor;
     DirectX::XMFLOAT4 SunlightDirection;
@@ -62,6 +70,9 @@ struct SceneObject
     float worldRadius = 1.0f;
     DirectX::XMFLOAT4 color = { 1, 1, 1, 1 };
     Material material = Material::Plastic();
+    uint32_t objectId = kInvalidObjectId;
+    std::string debugName;
+    std::string sourceMeshPath;
 
     bool absorbed = false;
 
@@ -102,11 +113,96 @@ struct LightShotSettings
     float spawnForwardOffset = 0.f;                      // Extra spawn distance in front of the ball
     float visualRadius = 0.1f;                           // Rendered emissive sphere radius
     float visualIntensity = 2.f;                         // Brightness of the rendered sphere
+    bool particleSdfEnabled = true;                       // Makes light-shot particles react to active shot spheres
+    float particleSdfRadius = 0.24f;                      // Collision radius around the visible shot sphere
+    float particleSdfInfluenceDistance = 0.42f;           // Extra distance where particles start bending around the shot
+    float particleSdfRepelStrength = 5.0f;                // Outward force applied to particles near the shot sphere
+    float particleSdfVelocityTransfer = 0.18f;            // Fraction of shot velocity inherited by nearby particles
+    float particleSdfSurfaceOffset = 0.03f;               // Keeps particles just outside the shot sphere
     float trailEmitInterval = 0.02f;                     // Seconds between trail stamps
     float trailLifetime = 0.1f;                          // Seconds before a trail stamp fades out
     float trailRadius = 0.05f;                           // Base radius of each ground glow stamp
     float trailIntensity = 0.05f;                        // Base brightness of each ground glow stamp
     DirectX::XMFLOAT3 color = { 1.0f, 0.75f, 0.35f };    // Shared color for light, sphere, and trail
+};
+
+struct ParticleSdfSettings
+{
+    bool enabled = true;                                  // Enables ball/particle SDF interaction for this emitter
+    float influenceDistance = 2.2f;                       // Extra distance around the ball where particles start reacting
+    float repelStrength = 28.0f;                          // Outward acceleration applied near the ball surface
+    float velocityTransfer = 0.45f;                       // Fraction of ball velocity transferred into nearby particles
+    float surfaceOffset = 0.08f;                          // Keeps particles slightly outside the ball SDF surface
+};
+
+struct WaterfallDesc
+{
+    std::string debugName = "Waterfall";
+    DirectX::XMFLOAT3 position = { 0.0f, 0.0f, 0.0f };       // XZ anchor; Y is used only when anchorToTerrain is false
+    float emitterYaw = 0.0f;                                 // Horizontal rotation of the rectangular emitter in radians
+    DirectX::XMFLOAT3 flowDirection = { 0.0f, -1.0f, 0.0f }; // Initial particle flow direction
+    float width = 5.0f;                                      // Emitter rectangle width in world units
+    float depth = 0.8f;                                      // Emitter rectangle thickness in world units
+    float heightAboveTerrain = 13.0f;                        // Spawn height over terrain when anchorToTerrain is true
+    float emissionRate = 900.0f;                             // Particles spawned per second
+    int maxEmitPerFrame = 384;                               // Safety cap for low-FPS frames
+    bool anchorToTerrain = true;                             // Recomputes top center from terrain height at position.xz
+    ParticleEmitterSettings particleSettings;                // Per-waterfall GPU particle visuals and motion
+    ParticleSdfSettings sdfSettings;                         // Per-waterfall reaction to the katamari ball SDF
+
+    WaterfallDesc() = default;
+    WaterfallDesc(
+        std::string name,
+        const DirectX::XMFLOAT3& pos,
+        float emitterWidth,
+        float emitterDepth,
+        float emitterHeightAboveTerrain,
+        float rate,
+        const ParticleEmitterSettings& particles)
+        : debugName(std::move(name)),
+          position(pos),
+          width(emitterWidth),
+          depth(emitterDepth),
+          heightAboveTerrain(emitterHeightAboveTerrain),
+          emissionRate(rate),
+          particleSettings(particles)
+    {
+    }
+};
+
+struct FountainDesc
+{
+    std::string debugName = "Fountain";
+    DirectX::XMFLOAT3 position = { 0.0f, 0.0f, 0.0f };       // XZ anchor; Y is used only when anchorToTerrain is false
+    float emitterYaw = 0.0f;                                 // Horizontal rotation of the ground emitter in radians
+    DirectX::XMFLOAT3 flowDirection = { 0.0f, 1.0f, 0.0f };  // Initial jet direction
+    float width = 0.8f;                                      // Ground emitter width in world units
+    float depth = 0.8f;                                      // Ground emitter depth in world units
+    float heightOffset = 0.05f;                              // Spawn height over terrain when anchorToTerrain is true
+    float emissionRate = 700.0f;                             // Particles spawned per second
+    int maxEmitPerFrame = 256;                               // Safety cap for low-FPS frames
+    bool anchorToTerrain = true;                             // Recomputes emitter center from terrain height at position.xz
+    ParticleEmitterSettings particleSettings;                // Per-fountain GPU particle visuals and motion
+    ParticleSdfSettings sdfSettings;                         // Per-fountain reaction to the katamari ball SDF
+
+    FountainDesc() = default;
+    FountainDesc(
+        std::string name,
+        const DirectX::XMFLOAT3& pos,
+        float emitterWidth,
+        float emitterDepth,
+        float emitterHeightOffset,
+        float rate,
+        const ParticleEmitterSettings& particles)
+        : debugName(std::move(name)),
+          position(pos),
+          width(emitterWidth),
+          depth(emitterDepth),
+          heightOffset(emitterHeightOffset),
+          emissionRate(rate),
+          particleSettings(particles)
+    {
+    }
 };
 
 class KatamariComponent : public GameComponent
@@ -115,9 +211,11 @@ public:
     explicit KatamariComponent(
         Game* owner,
         std::vector<ObjectDesc> objectDescs,
+        std::vector<WaterfallDesc> waterfallDescs,
+        std::vector<FountainDesc> fountainDescs,
         std::wstring ballTexturePath,
         std::wstring floorTexturePath,
-        std::wstring shaderPath = L"shaders/Katamari.hlsl",
+        std::wstring lightShotVisualShaderPath = L"shaders/LightShotVisual.hlsl",
         float sceneRadius = 60.0f);
 
     void Initialize() override;
@@ -145,14 +243,36 @@ private:
         float age = 0.0f;                             //in secs
     };
 
+    struct ActiveWaterfall
+    {
+        WaterfallDesc desc;
+        ParticleSystem particles;
+        DirectX::XMFLOAT3 topCenter = { 0.0f, 10.0f, 0.0f };
+        DirectX::XMFLOAT3 widthAxis = { 1.0f, 0.0f, 0.0f };
+        DirectX::XMFLOAT3 depthAxis = { 0.0f, 0.0f, 1.0f };
+        float emissionAccumulator = 0.0f;
+    };
+
+    struct ActiveFountain
+    {
+        FountainDesc desc;
+        ParticleSystem particles;
+        DirectX::XMFLOAT3 emitterCenter = { 0.0f, 0.0f, 0.0f };
+        DirectX::XMFLOAT3 widthAxis = { 1.0f, 0.0f, 0.0f };
+        DirectX::XMFLOAT3 depthAxis = { 0.0f, 0.0f, 1.0f };
+        float emissionAccumulator = 0.0f;
+    };
+
     std::vector<ObjectDesc> objectDescs;
-    std::wstring shaderPath;
+    std::vector<WaterfallDesc> waterfallDescs;
+    std::vector<FountainDesc> fountainDescs;
+    std::wstring lightShotVisualShaderPath;
 	std::wstring shadowShaderPath = L"shaders/ShadowPass.hlsl";
     float sceneRadius;
 
     //Sun
     DirectX::XMFLOAT4 SunlightDirection = { 0.577f, 0.577f, 0.577f, 0.0f };
-    DirectX::XMFLOAT4 SunlightColor = { 1.0f, 1.0f, 1.0f, 1.0f };
+    DirectX::XMFLOAT4 SunlightColor = { 1.0f, 1.0f, 1.0f, 1.5f };
 
     //Ball
     std::shared_ptr<Mesh> ballMesh;
@@ -161,6 +281,7 @@ private:
     int ballSlices = 32;
     float ballSpeed = 7.f;
     DirectX::XMFLOAT3 ballPos = { 0, 0, 0 };
+    DirectX::XMFLOAT3 previousBallPos = { 0, 0, 0 };
     DirectX::XMFLOAT4X4 ballOrientMtx;
     DirectX::XMFLOAT4 ballColor = { 1.f, 1.f, 1.f, 1.f };
     Material ballMaterial = Material::Rubber();
@@ -183,6 +304,8 @@ private:
 
     //Stats
     int absorbedCount = 0;
+    bool gamePaused = false;
+    bool pauseToggleHeld = false;
 
     // Light shots
     LightShotSettings lightShotSettings;               //Tunable shooting and lighting parameters
@@ -194,8 +317,9 @@ private:
     // Particles
     ParticleEmitterSettings lightShotParticleSettings;
     ParticleSystem lightShotParticles;
+    std::vector<ActiveWaterfall> waterfalls;
+    std::vector<ActiveFountain> fountains;
     ParticleRenderer particleRenderer;
-    std::vector<ParticleVertex> particleDrawVertices;
 
     // Shadow
     ShadowData shadow;
@@ -208,17 +332,23 @@ private:
     ShadowMapHud shadowMapHud;
     bool shadowHudToggleHeld = false;
     bool shadowHudInvertToggleHeld = false;
+    bool cascadeColorDebugEnabled = false;
+    bool cascadeColorDebugToggleHeld = false;
 
     // Deferred rendering
     RenderingSystem renderingSystem;
+    GBufferPicker gBufferPicker;
+    bool pendingGBufferPick = false;
+    uint32_t pendingPickX = 0;
+    uint32_t pendingPickY = 0;
     bool demoSpotLightEnabled = true;
     DirectX::XMFLOAT3 demoSpotLightColor = { 0.55f, 0.65f, 1.0f };
     float demoSpotLightIntensity = 0.8f;
     float demoSpotLightRange = 18.0f;
 
     //D3D
-    Microsoft::WRL::ComPtr<ID3D11VertexShader> vertexShader;
-    Microsoft::WRL::ComPtr<ID3D11PixelShader> pixelShader;
+    Microsoft::WRL::ComPtr<ID3D11VertexShader> lightShotVisualVertexShader;
+    Microsoft::WRL::ComPtr<ID3D11PixelShader> lightShotVisualPixelShader;
     Microsoft::WRL::ComPtr<ID3D11InputLayout> inputLayout;
     Microsoft::WRL::ComPtr<ID3D11Buffer> constantBuffer;
     Microsoft::WRL::ComPtr<ID3D11RasterizerState> rastState;
@@ -238,7 +368,7 @@ private:
     void DrawSceneForShadow();
     void UpdateShadowHudInput(float dt);
 
-    void CompileShaders();
+    void CompileLightShotVisualShaders();
     void CreateInputLayout();
     void CreateConstantBuffer();
     void CreateRasterizerState();
@@ -249,10 +379,18 @@ private:
     void BuildFloorMesh();
     void BuildObjectMeshes();
     void ScatterObjects();
+    void CreateWaterfalls();
+    void CreateFountains();
 
     void UpdateBallPhysics(float dt);
     void CheckAbsorption();
     void UpdateLightShots(float dt);
+    void UpdateLightShotParticles(float dt);
+    void UpdateWaterfalls(float dt, const DirectX::XMFLOAT3& ballVelocity);
+    void UpdateFountains(float dt, const DirectX::XMFLOAT3& ballVelocity);
+    void UpdateMouseCameraAndPicking(float dt);
+    void UpdatePauseInput();
+    void ApplyCameraFrameState();
     void SpawnLightShot();
     void EmitLightTrail(const DirectX::XMFLOAT3& shotPosition);
     void EmitShotParticles(const DirectX::XMFLOAT3& shotPosition, const DirectX::XMFLOAT3& shotDirection, int burstCount);
@@ -265,10 +403,12 @@ private:
     void DrawFloor(const DirectX::XMMATRIX& v, const DirectX::XMMATRIX& p, const DirectX::XMFLOAT3& cam);
     void DrawLightShots(const DirectX::XMMATRIX& v, const DirectX::XMMATRIX& p, const DirectX::XMFLOAT3& cam);
     void DrawParticles(const DirectX::XMMATRIX& v, const DirectX::XMMATRIX& p, const DirectX::XMFLOAT3& cam, int width, int height);
-    void ApplyForwardPipeline();
+    void ApplyLightShotVisualPipeline();
     DeferredLightingData BuildDeferredLightingData(const DirectX::XMFLOAT3& camPos) const;
+    void ExecutePendingGBufferPick(uint32_t width, uint32_t height, const DirectX::XMMATRIX& view, const DirectX::XMMATRIX& projection);
+    std::string DescribeObjectId(uint32_t objectId) const;
 
-    void SetConstantBuffer(const DirectX::XMMATRIX& world, const DirectX::XMMATRIX& view, const DirectX::XMMATRIX& projection, const Material& material, const DirectX::XMFLOAT3& camPos, float groundTrailMask = 0.0f, float lightShotEmissive = 0.0f);
+    void SetConstantBuffer(const DirectX::XMMATRIX& world, const DirectX::XMMATRIX& view, const DirectX::XMMATRIX& projection, const Material& material, const DirectX::XMFLOAT3& camPos, uint32_t objectId = kInvalidObjectId, float groundTrailMask = 0.0f, float lightShotEmissive = 0.0f);
     void FillLightShotConstants(PerObjectCB* cb, float groundTrailMask, float lightShotEmissive) const;
 
     DirectX::XMMATRIX BallWorldMatrix() const;

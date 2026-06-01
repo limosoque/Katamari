@@ -1,220 +1,449 @@
 #define NOMINMAX
 
 #include "ParticleSystem.h"
+#include "Game.h"
 
 #include <algorithm>
-#include <cmath>
+#include <d3dcompiler.h>
+#include <iostream>
+#include <stdexcept>
+#include <utility>
 
 using namespace DirectX;
+using Microsoft::WRL::ComPtr;
 
-void ParticleSystem::Initialize(const ParticleEmitterSettings& emitterSettings)
+ParticleSystem::ParticleSystem(std::wstring computePath)
+    : shaderPath(std::move(computePath))
 {
+}
+
+void ParticleSystem::Initialize(Game* owner, const ParticleEmitterSettings& emitterSettings)
+{
+    game = owner;
     settings = emitterSettings;
-    particles.clear();
-    particles.reserve(settings.maxParticles);
+    maxParticles = std::max<size_t>(1, settings.maxParticles);
     emissionAccumulator = 0.0f;
+    spawnCursor = 0;
+    nextSeed = 1;
+    pendingEmits.clear();
+
+    CompileShaders();
+    CreateBuffers();
+    Clear();
 }
 
 void ParticleSystem::SetSettings(const ParticleEmitterSettings& emitterSettings)
 {
+    size_t oldMaxParticles = maxParticles;
     settings = emitterSettings;
-    if (particles.size() > settings.maxParticles)
+    maxParticles = std::max<size_t>(1, settings.maxParticles);
+
+    if (game && oldMaxParticles != maxParticles)
     {
-        particles.erase(particles.begin(), particles.begin() + (particles.size() - settings.maxParticles));
+        RecreateParticleResources();
+        Clear();
     }
-    particles.reserve(settings.maxParticles);
+}
+
+void ParticleSystem::CompileShaders()
+{
+    ComPtr<ID3DBlob> errors;
+    UINT flags = D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+
+    ComPtr<ID3DBlob> updateBytecode;
+    HRESULT hr = D3DCompileFromFile(
+        shaderPath.c_str(),
+        nullptr,
+        nullptr,
+        "CSUpdate",
+        "cs_5_0",
+        flags,
+        0,
+        updateBytecode.GetAddressOf(),
+        errors.GetAddressOf());
+    if (FAILED(hr))
+    {
+        if (errors) std::cerr << "[ParticlesUpdateCS] " << static_cast<char*>(errors->GetBufferPointer()) << '\n';
+        throw std::runtime_error("ParticleSystem: update compute shader compilation failed.");
+    }
+
+    hr = game->Device->CreateComputeShader(
+        updateBytecode->GetBufferPointer(),
+        updateBytecode->GetBufferSize(),
+        nullptr,
+        updateShader.GetAddressOf());
+    if (FAILED(hr))
+    {
+        throw std::runtime_error("ParticleSystem: CreateComputeShader update failed.");
+    }
+
+    errors.Reset();
+    ComPtr<ID3DBlob> emitBytecode;
+    hr = D3DCompileFromFile(
+        shaderPath.c_str(),
+        nullptr,
+        nullptr,
+        "CSEmit",
+        "cs_5_0",
+        flags,
+        0,
+        emitBytecode.GetAddressOf(),
+        errors.GetAddressOf());
+    if (FAILED(hr))
+    {
+        if (errors) std::cerr << "[ParticlesEmitCS] " << static_cast<char*>(errors->GetBufferPointer()) << '\n';
+        throw std::runtime_error("ParticleSystem: emit compute shader compilation failed.");
+    }
+
+    hr = game->Device->CreateComputeShader(
+        emitBytecode->GetBufferPointer(),
+        emitBytecode->GetBufferSize(),
+        nullptr,
+        emitShader.GetAddressOf());
+    if (FAILED(hr))
+    {
+        throw std::runtime_error("ParticleSystem: CreateComputeShader emit failed.");
+    }
+}
+
+void ParticleSystem::CreateBuffers()
+{
+    RecreateParticleResources();
+
+    D3D11_BUFFER_DESC cbDesc = {};
+    cbDesc.Usage = D3D11_USAGE_DYNAMIC;
+    cbDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    cbDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    cbDesc.ByteWidth = sizeof(ParticleComputeCB);
+
+    HRESULT hr = game->Device->CreateBuffer(&cbDesc, nullptr, computeConstantBuffer.GetAddressOf());
+    if (FAILED(hr))
+    {
+        throw std::runtime_error("ParticleSystem: CreateBuffer compute constants failed.");
+    }
+}
+
+void ParticleSystem::RecreateParticleResources()
+{
+    particleSrv.Reset();
+    particleUav.Reset();
+    particleBuffer.Reset();
+
+    std::vector<GpuParticleData> initialParticles(maxParticles);
+
+    D3D11_SUBRESOURCE_DATA initData = {};
+    initData.pSysMem = initialParticles.data();
+
+    D3D11_BUFFER_DESC bufferDesc = {};
+    bufferDesc.Usage = D3D11_USAGE_DEFAULT;
+    bufferDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+    bufferDesc.ByteWidth = static_cast<UINT>(sizeof(GpuParticleData) * maxParticles);
+    bufferDesc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+    bufferDesc.StructureByteStride = sizeof(GpuParticleData);
+
+    HRESULT hr = game->Device->CreateBuffer(&bufferDesc, &initData, particleBuffer.GetAddressOf());
+    if (FAILED(hr))
+    {
+        throw std::runtime_error("ParticleSystem: CreateBuffer particles failed.");
+    }
+
+    D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+    srvDesc.Format = DXGI_FORMAT_UNKNOWN;
+    srvDesc.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+    srvDesc.Buffer.FirstElement = 0;
+    srvDesc.Buffer.NumElements = static_cast<UINT>(maxParticles);
+
+    hr = game->Device->CreateShaderResourceView(particleBuffer.Get(), &srvDesc, particleSrv.GetAddressOf());
+    if (FAILED(hr))
+    {
+        throw std::runtime_error("ParticleSystem: CreateShaderResourceView particles failed.");
+    }
+
+    D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
+    uavDesc.Format = DXGI_FORMAT_UNKNOWN;
+    uavDesc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+    uavDesc.Buffer.FirstElement = 0;
+    uavDesc.Buffer.NumElements = static_cast<UINT>(maxParticles);
+
+    hr = game->Device->CreateUnorderedAccessView(particleBuffer.Get(), &uavDesc, particleUav.GetAddressOf());
+    if (FAILED(hr))
+    {
+        throw std::runtime_error("ParticleSystem: CreateUnorderedAccessView particles failed.");
+    }
 }
 
 void ParticleSystem::Update(float dt)
 {
-    dt = std::min(dt, 0.05f);
-
-    XMVECTOR gravity = XMLoadFloat3(&settings.gravity);
-    XMVECTOR wind = XMLoadFloat3(&settings.wind);
-    float dragScale = std::max(0.0f, 1.0f - settings.drag * dt);
-
-    for (auto& particle : particles)
-    {
-        particle.age += dt;
-        if (particle.age >= particle.lifetime)
-        {
-            continue;
-        }
-
-        XMVECTOR position = XMLoadFloat3(&particle.position);
-        XMVECTOR velocity = XMLoadFloat3(&particle.velocity);
-        XMStoreFloat3(&particle.prevPosition, position);
-
-        XMVECTOR acceleration = gravity * particle.weight + wind;
-        velocity += acceleration * dt;
-        velocity *= dragScale;
-        position += velocity * dt;
-
-        particle.rotation += particle.angularVelocity * dt;
-        XMStoreFloat3(&particle.velocity, velocity);
-        XMStoreFloat3(&particle.position, position);
-    }
-
-    particles.erase(
-        std::remove_if(particles.begin(), particles.end(),
-            [](const Particle& particle)
-            {
-                return particle.age >= particle.lifetime;
-            }),
-        particles.end());
+    UpdateWithSdfSpheres(dt, nullptr, 0);
 }
 
-void ParticleSystem::EmitBurst(const XMFLOAT3& origin, const XMFLOAT3& direction, int count)
+void ParticleSystem::Update(float dt, const ParticleSdfSphere& sdfSphere)
 {
-    if (count <= 0 || settings.maxParticles == 0)
+    UpdateWithSdfSpheres(dt, &sdfSphere, 1);
+}
+
+void ParticleSystem::Update(float dt, const std::vector<ParticleSdfSphere>& sdfSpheres)
+{
+    UpdateWithSdfSpheres(dt, sdfSpheres.data(), sdfSpheres.size());
+}
+
+void ParticleSystem::UpdateWithSdfSpheres(float dt, const ParticleSdfSphere* sdfSpheres, size_t sdfSphereCount)
+{
+    if (!game || !particleUav || maxParticles == 0)
     {
         return;
     }
 
-    for (int i = 0; i < count; ++i)
+    dt = std::min(std::max(dt, 0.0f), 0.05f);
+    DispatchUpdate(dt, sdfSpheres, sdfSphereCount);
+
+    for (const PendingEmit& emit : pendingEmits)
     {
-        EmitOne(origin, direction);
+        DispatchEmit(emit);
     }
+    pendingEmits.clear();
+}
+
+void ParticleSystem::EmitBurst(const XMFLOAT3& origin, const XMFLOAT3& direction, int count)
+{
+    if (count <= 0 || maxParticles == 0)
+    {
+        return;
+    }
+
+    PendingEmit emit;
+    emit.origin = origin;
+    emit.direction = direction;
+    emit.count = static_cast<uint32_t>(std::min<size_t>(static_cast<size_t>(count), maxParticles));
+    emit.seed = nextSeed++;
+    pendingEmits.push_back(emit);
+}
+
+void ParticleSystem::EmitBoxBurst(
+    const XMFLOAT3& center,
+    const XMFLOAT3& widthAxis,
+    const XMFLOAT3& depthAxis,
+    float width,
+    float depth,
+    const XMFLOAT3& direction,
+    int count)
+{
+    if (count <= 0 || maxParticles == 0)
+    {
+        return;
+    }
+
+    PendingEmit emit;
+    emit.origin = center;
+    emit.direction = direction;
+    emit.widthAxis = widthAxis;
+    emit.depthAxis = depthAxis;
+    emit.width = std::max(0.0f, width);
+    emit.depth = std::max(0.0f, depth);
+    emit.count = static_cast<uint32_t>(std::min<size_t>(static_cast<size_t>(count), maxParticles));
+    emit.seed = nextSeed++;
+    pendingEmits.push_back(emit);
 }
 
 void ParticleSystem::EmitContinuous(const XMFLOAT3& origin, const XMFLOAT3& direction, float dt)
 {
-    if (settings.emissionRate <= 0.0f || settings.maxParticles == 0)
+    if (settings.emissionRate <= 0.0f || maxParticles == 0)
     {
         return;
     }
 
     emissionAccumulator += settings.emissionRate * std::max(0.0f, dt);
-    int emitCount = static_cast<int>(std::floor(emissionAccumulator));
+    int emitCount = static_cast<int>(emissionAccumulator);
     emissionAccumulator -= static_cast<float>(emitCount);
 
     emitCount = std::min(emitCount, 32);
     EmitBurst(origin, direction, emitCount);
 }
 
-void ParticleSystem::EmitOne(const XMFLOAT3& origin, const XMFLOAT3& direction)
+void ParticleSystem::DispatchUpdate(float dt, const ParticleSdfSphere* sdfSpheres, size_t sdfSphereCount)
 {
-    if (particles.size() >= settings.maxParticles)
+    ParticleComputeCB constants = {};
+    constants.GravityDrag = XMFLOAT4(settings.gravity.x, settings.gravity.y, settings.gravity.z, settings.drag);
+    constants.WindDt = XMFLOAT4(settings.wind.x, settings.wind.y, settings.wind.z, dt);
+    constants.SpawnInfo = XMFLOAT4(0.0f, 0.0f, static_cast<float>(maxParticles), 0.0f);
+
+    size_t sdfCount = 0;
+    if (sdfSpheres)
     {
-        particles.erase(particles.begin());
-    }
-
-    XMVECTOR randomDirection = RandomDirectionInCone(XMLoadFloat3(&direction));
-    float speed = RandomFloat(settings.speedMin, settings.speedMax);
-
-    Particle particle;
-    particle.position = origin;
-    particle.prevPosition = origin;
-    XMStoreFloat3(&particle.velocity, randomDirection * speed);
-    particle.age = 0.0f;
-    particle.lifetime = std::max(0.01f, RandomFloat(settings.lifetimeMin, settings.lifetimeMax));
-    particle.startSize = RandomFloat(settings.startSizeMin, settings.startSizeMax);
-    particle.endSize = RandomFloat(settings.endSizeMin, settings.endSizeMax);
-    particle.weight = RandomFloat(settings.weightMin, settings.weightMax);
-    particle.rotation = RandomFloat(0.0f, XM_2PI);
-    particle.angularVelocity = RandomFloat(settings.rotationSpeedMin, settings.rotationSpeedMax);
-    particle.edgeSoftness = settings.edgeSoftness;
-    particle.brightness = RandomFloat(settings.brightnessMin, settings.brightnessMax);
-    particle.startColor = settings.startColor;
-    particle.endColor = settings.endColor;
-
-    particles.push_back(particle);
-}
-
-XMVECTOR ParticleSystem::RandomDirectionInCone(XMVECTOR direction)
-{
-    XMVECTOR base = XMVector3Normalize(direction);
-    if (XMVectorGetX(XMVector3LengthSq(base)) < 0.0001f)
-    {
-        base = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
-    }
-
-    XMVECTOR worldUp = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
-    XMVECTOR right = XMVector3Cross(worldUp, base);
-    if (XMVectorGetX(XMVector3LengthSq(right)) < 0.0001f)
-    {
-        right = XMVectorSet(1.0f, 0.0f, 0.0f, 0.0f);
-    }
-    right = XMVector3Normalize(right);
-    XMVECTOR up = XMVector3Normalize(XMVector3Cross(base, right));
-
-    float spread = std::tan(std::max(0.0f, settings.spreadRadians));
-    float side = RandomFloat(-spread, spread);
-    float lift = RandomFloat(-spread, spread);
-    float forwardBias = RandomFloat(0.65f, 1.0f);
-
-    return XMVector3Normalize(base * forwardBias + right * side + up * lift);
-}
-
-void ParticleSystem::BuildVertices(const XMFLOAT3& cameraPosition, std::vector<ParticleVertex>& outVertices) const
-{
-    struct SortItem
-    {
-        ParticleVertex vertex;
-        float distanceSq = 0.0f;
-    };
-
-    std::vector<SortItem> sorted;
-    sorted.reserve(particles.size());
-
-    XMVECTOR camera = XMLoadFloat3(&cameraPosition);
-    for (const Particle& particle : particles)
-    {
-        float t = std::min(std::max(particle.age / std::max(0.001f, particle.lifetime), 0.0f), 1.0f);
-        float size = particle.startSize + (particle.endSize - particle.startSize) * t;
-        XMFLOAT4 color = LerpColor(particle.startColor, particle.endColor, t);
-
-        float fadeIn = std::min(particle.age / 0.06f, 1.0f);
-        color.w *= fadeIn;
-
-        ParticleVertex vertex;
-        vertex.Position = particle.position;
-        vertex.Size = size;
-        vertex.Color = color;
-        vertex.Params = XMFLOAT4(particle.rotation, particle.edgeSoftness, t, particle.brightness);
-
-        XMVECTOR toCamera = XMLoadFloat3(&particle.position) - camera;
-        SortItem item;
-        item.vertex = vertex;
-        item.distanceSq = XMVectorGetX(XMVector3LengthSq(toCamera));
-        sorted.push_back(item);
-    }
-
-    std::sort(sorted.begin(), sorted.end(),
-        [](const SortItem& a, const SortItem& b)
+        size_t sourceCount = std::min(sdfSphereCount, static_cast<size_t>(kMaxParticleSdfSpheres));
+        for (size_t i = 0; i < sourceCount; ++i)
         {
-            return a.distanceSq > b.distanceSq;
-        });
+            const ParticleSdfSphere& sdfSphere = sdfSpheres[i];
+            if (sdfSphere.enabled <= 0.0f || sdfSphere.radius <= 0.0f)
+            {
+                continue;
+            }
 
-    outVertices.clear();
-    outVertices.reserve(sorted.size());
-    for (const SortItem& item : sorted)
-    {
-        outVertices.push_back(item.vertex);
+            constants.SdfCenterRadius[sdfCount] = XMFLOAT4(
+                sdfSphere.center.x,
+                sdfSphere.center.y,
+                sdfSphere.center.z,
+                sdfSphere.radius);
+            constants.SdfVelocityInfluence[sdfCount] = XMFLOAT4(
+                sdfSphere.velocity.x,
+                sdfSphere.velocity.y,
+                sdfSphere.velocity.z,
+                sdfSphere.influenceDistance);
+            constants.SdfParams[sdfCount] = XMFLOAT4(
+                sdfSphere.repelStrength,
+                sdfSphere.surfaceOffset,
+                sdfSphere.velocityTransfer,
+                sdfSphere.enabled);
+            ++sdfCount;
+        }
     }
+
+    constants.SdfControl = XMFLOAT4(static_cast<float>(sdfCount), 0.0f, 0.0f, 0.0f);
+    constants.TerrainParams = XMFLOAT4(
+        settings.groundCollision.terrainAmplitude,
+        settings.groundCollision.terrainFrequency,
+        settings.groundCollision.terrainNormalSampleOffset,
+        0.0f);
+    constants.GroundCollisionParams = XMFLOAT4(
+        settings.groundCollision.enabled ? 1.0f : 0.0f,
+        settings.groundCollision.surfaceOffset,
+        settings.groundCollision.restitution,
+        settings.groundCollision.friction);
+    UpdateComputeConstants(constants);
+
+    auto* ctx = game->Context.Get();
+    ID3D11UnorderedAccessView* uav = particleUav.Get();
+    ctx->CSSetShader(updateShader.Get(), nullptr, 0);
+    ctx->CSSetConstantBuffers(0, 1, computeConstantBuffer.GetAddressOf());
+    ctx->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+
+    const UINT threadsPerGroup = 256;
+    UINT groups = static_cast<UINT>((maxParticles + threadsPerGroup - 1) / threadsPerGroup);
+    ctx->Dispatch(groups, 1, 1);
+    UnbindComputeResources();
+}
+
+void ParticleSystem::DispatchEmit(const PendingEmit& emit)
+{
+    if (emit.count == 0)
+    {
+        return;
+    }
+
+    uint32_t spawnStart = spawnCursor;
+    spawnCursor = static_cast<uint32_t>((spawnCursor + emit.count) % maxParticles);
+
+    ParticleComputeCB constants = {};
+    constants.OriginCount = XMFLOAT4(
+        emit.origin.x,
+        emit.origin.y,
+        emit.origin.z,
+        static_cast<float>(emit.count));
+    constants.DirectionSpread = XMFLOAT4(
+        emit.direction.x,
+        emit.direction.y,
+        emit.direction.z,
+        settings.spreadRadians);
+    constants.SpeedLifetime = XMFLOAT4(
+        settings.speedMin,
+        settings.speedMax,
+        settings.lifetimeMin,
+        settings.lifetimeMax);
+    constants.SizeRanges = XMFLOAT4(
+        settings.startSizeMin,
+        settings.startSizeMax,
+        settings.endSizeMin,
+        settings.endSizeMax);
+    constants.WeightRotation = XMFLOAT4(
+        settings.weightMin,
+        settings.weightMax,
+        settings.rotationSpeedMin,
+        settings.rotationSpeedMax);
+    constants.StartColor = settings.startColor;
+    constants.EndColor = settings.endColor;
+    constants.EmitParams = XMFLOAT4(
+        settings.edgeSoftness,
+        settings.brightnessMin,
+        settings.brightnessMax,
+        0.0f);
+    constants.SpawnInfo = XMFLOAT4(
+        static_cast<float>(spawnStart),
+        static_cast<float>(emit.seed),
+        static_cast<float>(maxParticles),
+        0.0f);
+    constants.EmitWidthAxis = XMFLOAT4(
+        emit.widthAxis.x,
+        emit.widthAxis.y,
+        emit.widthAxis.z,
+        emit.width);
+    constants.EmitDepthAxis = XMFLOAT4(
+        emit.depthAxis.x,
+        emit.depthAxis.y,
+        emit.depthAxis.z,
+        emit.depth);
+    UpdateComputeConstants(constants);
+
+    auto* ctx = game->Context.Get();
+    ID3D11UnorderedAccessView* uav = particleUav.Get();
+    ctx->CSSetShader(emitShader.Get(), nullptr, 0);
+    ctx->CSSetConstantBuffers(0, 1, computeConstantBuffer.GetAddressOf());
+    ctx->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+
+    const UINT threadsPerGroup = 256;
+    UINT groups = (emit.count + threadsPerGroup - 1) / threadsPerGroup;
+    ctx->Dispatch(groups, 1, 1);
+    UnbindComputeResources();
+}
+
+void ParticleSystem::UpdateComputeConstants(const ParticleComputeCB& constants)
+{
+    D3D11_MAPPED_SUBRESOURCE mapped = {};
+    if (FAILED(game->Context->Map(computeConstantBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
+    {
+        return;
+    }
+
+    *reinterpret_cast<ParticleComputeCB*>(mapped.pData) = constants;
+    game->Context->Unmap(computeConstantBuffer.Get(), 0);
+}
+
+void ParticleSystem::UnbindComputeResources()
+{
+    ID3D11UnorderedAccessView* nullUav = nullptr;
+    game->Context->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
+    game->Context->CSSetShader(nullptr, nullptr, 0);
 }
 
 void ParticleSystem::Clear()
 {
-    particles.clear();
     emissionAccumulator = 0.0f;
-}
+    spawnCursor = 0;
+    pendingEmits.clear();
 
-float ParticleSystem::RandomFloat(float lo, float hi)
-{
-    if (hi < lo)
+    if (!game || !particleBuffer)
     {
-        std::swap(lo, hi);
+        return;
     }
 
-    return lo + std::uniform_real_distribution<float>(0.0f, 1.0f)(rng) * (hi - lo);
+    std::vector<GpuParticleData> cleared(maxParticles);
+    game->Context->UpdateSubresource(
+        particleBuffer.Get(),
+        0,
+        nullptr,
+        cleared.data(),
+        0,
+        0);
 }
 
-XMFLOAT4 ParticleSystem::LerpColor(const XMFLOAT4& a, const XMFLOAT4& b, float t)
+void ParticleSystem::DestroyResources()
 {
-    return XMFLOAT4(
-        a.x + (b.x - a.x) * t,
-        a.y + (b.y - a.y) * t,
-        a.z + (b.z - a.z) * t,
-        a.w + (b.w - a.w) * t);
+    pendingEmits.clear();
+    computeConstantBuffer.Reset();
+    particleUav.Reset();
+    particleSrv.Reset();
+    particleBuffer.Reset();
+    emitShader.Reset();
+    updateShader.Reset();
+    game = nullptr;
+    maxParticles = 0;
 }

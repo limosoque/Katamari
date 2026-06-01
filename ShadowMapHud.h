@@ -12,7 +12,7 @@ class ShadowMapHud
 public:
     bool Enabled = false;
     bool UseDepthContours = false;
-    float Exposure = 8.0f;
+    float Exposure = 1.0f;
     float PanelSize = 220.0f;
     float PanelPadding = 12.0f;
     float PanelMargin = 16.0f;

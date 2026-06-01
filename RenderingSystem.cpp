@@ -268,6 +268,7 @@ void RenderingSystem::UpdateLightingConstants(const DeferredLightingData& lighti
     cb->CascadeSplits = lightingData.CascadeSplits;
     cb->SkyColor = lightingData.SkyColor;
     cb->TrailColor = lightingData.TrailColor;
+    cb->DebugFlags = lightingData.DebugFlags;
 
     for (int i = 0; i < kCascadeCount; ++i)
     {
@@ -378,14 +379,14 @@ void RenderingSystem::RenderLighting(
     ctx->PSSetConstantBuffers(0, 1, lightingConstantBuffer.GetAddressOf());
 
     gBuffer.BindForReading(0);
-    ctx->PSSetShaderResources(5, 1, &shadowMapSrv);
+    ctx->PSSetShaderResources(6, 1, &shadowMapSrv);
     ctx->PSSetSamplers(1, 1, &shadowSampler);
 
     ctx->Draw(6, 0);
 
     gBuffer.UnbindFromShader(0);
     ID3D11ShaderResourceView* nullShadow = nullptr;
-    ctx->PSSetShaderResources(5, 1, &nullShadow);
+    ctx->PSSetShaderResources(6, 1, &nullShadow);
 }
 
 void RenderingSystem::DestroyResources()

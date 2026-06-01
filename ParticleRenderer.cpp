@@ -52,8 +52,6 @@ void ParticleRenderer::CompileShaders()
         throw std::runtime_error("ParticleRenderer: CreateVertexShader failed.");
     }
 
-    CreateInputLayout(vsBytecode.Get());
-
     ComPtr<ID3DBlob> gsBytecode;
     errors.Reset();
     hr = D3DCompileFromFile(
@@ -99,49 +97,15 @@ void ParticleRenderer::CompileShaders()
     }
 }
 
-void ParticleRenderer::CreateInputLayout(ID3DBlob* vertexShaderBytecode)
-{
-    D3D11_INPUT_ELEMENT_DESC elements[] =
-    {
-        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
-        { "TEXCOORD", 0, DXGI_FORMAT_R32_FLOAT, 0, D3D11_APPEND_ALIGNED_ELEMENT, D3D11_INPUT_PER_VERTEX_DATA, 0 },
-        { "COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, D3D11_APPEND_ALIGNED_ELEMENT, D3D11_INPUT_PER_VERTEX_DATA, 0 },
-        { "TEXCOORD", 1, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, D3D11_APPEND_ALIGNED_ELEMENT, D3D11_INPUT_PER_VERTEX_DATA, 0 },
-    };
-
-    HRESULT hr = game->Device->CreateInputLayout(
-        elements,
-        static_cast<unsigned int>(sizeof(elements) / sizeof(elements[0])),
-        vertexShaderBytecode->GetBufferPointer(),
-        vertexShaderBytecode->GetBufferSize(),
-        inputLayout.GetAddressOf());
-    if (FAILED(hr))
-    {
-        throw std::runtime_error("ParticleRenderer: CreateInputLayout failed.");
-    }
-}
-
 void ParticleRenderer::CreateBuffers()
 {
-    D3D11_BUFFER_DESC vbDesc = {};
-    vbDesc.Usage = D3D11_USAGE_DYNAMIC;
-    vbDesc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-    vbDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-    vbDesc.ByteWidth = static_cast<unsigned int>(sizeof(ParticleVertex) * maxParticles);
-
-    HRESULT hr = game->Device->CreateBuffer(&vbDesc, nullptr, vertexBuffer.GetAddressOf());
-    if (FAILED(hr))
-    {
-        throw std::runtime_error("ParticleRenderer: CreateBuffer vertex failed.");
-    }
-
     D3D11_BUFFER_DESC cbDesc = {};
     cbDesc.Usage = D3D11_USAGE_DYNAMIC;
     cbDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     cbDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
     cbDesc.ByteWidth = sizeof(ParticleFrameCB);
 
-    hr = game->Device->CreateBuffer(&cbDesc, nullptr, constantBuffer.GetAddressOf());
+    HRESULT hr = game->Device->CreateBuffer(&cbDesc, nullptr, constantBuffer.GetAddressOf());
     if (FAILED(hr))
     {
         throw std::runtime_error("ParticleRenderer: CreateBuffer constant failed.");
@@ -221,7 +185,7 @@ void ParticleRenderer::UpdateFrameConstants(
 }
 
 void ParticleRenderer::Draw(
-    const std::vector<ParticleVertex>& particles,
+    const ParticleSystem& particles,
     const XMMATRIX& view,
     const XMMATRIX& projection,
     ID3D11RenderTargetView* outputTarget,
@@ -230,20 +194,12 @@ void ParticleRenderer::Draw(
     int screenWidth,
     int screenHeight)
 {
-    if (!game || particles.empty() || !outputTarget || !depthView || !sceneViewDepthSrv)
+    ID3D11ShaderResourceView* particleSrv = particles.GetParticleSrv();
+    if (!game || !particleSrv || particles.MaxParticles() == 0 || !outputTarget || !depthView || !sceneViewDepthSrv)
     {
         return;
     }
 
-    size_t drawCount = std::min(particles.size(), maxParticles);
-    D3D11_MAPPED_SUBRESOURCE mapped = {};
-    if (FAILED(game->Context->Map(vertexBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
-    {
-        return;
-    }
-
-    std::copy_n(particles.data(), drawCount, reinterpret_cast<ParticleVertex*>(mapped.pData));
-    game->Context->Unmap(vertexBuffer.Get(), 0);
     UpdateFrameConstants(view, projection, screenWidth, screenHeight);
 
     auto* ctx = game->Context.Get();
@@ -261,11 +217,11 @@ void ParticleRenderer::Draw(
     ctx->OMSetDepthStencilState(depthReadState.Get(), 0);
     ctx->RSSetState(rasterizerState.Get());
 
-    unsigned int stride = sizeof(ParticleVertex);
-    unsigned int offset = 0;
-    ID3D11Buffer* vb = vertexBuffer.Get();
-    ctx->IASetInputLayout(inputLayout.Get());
-    ctx->IASetVertexBuffers(0, 1, &vb, &stride, &offset);
+    ID3D11Buffer* noVertexBuffers[] = { nullptr };
+    unsigned int strides[] = { 0 };
+    unsigned int offsets[] = { 0 };
+    ctx->IASetInputLayout(nullptr);
+    ctx->IASetVertexBuffers(0, 1, noVertexBuffers, strides, offsets);
     ctx->IASetIndexBuffer(nullptr, DXGI_FORMAT_UNKNOWN, 0);
     ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_POINTLIST);
 
@@ -275,12 +231,14 @@ void ParticleRenderer::Draw(
     ctx->VSSetConstantBuffers(0, 1, constantBuffer.GetAddressOf());
     ctx->GSSetConstantBuffers(0, 1, constantBuffer.GetAddressOf());
     ctx->PSSetConstantBuffers(0, 1, constantBuffer.GetAddressOf());
-    ctx->PSSetShaderResources(0, 1, &sceneViewDepthSrv);
+    ctx->VSSetShaderResources(0, 1, &particleSrv);
+    ctx->PSSetShaderResources(1, 1, &sceneViewDepthSrv);
 
-    ctx->Draw(static_cast<unsigned int>(drawCount), 0);
+    ctx->Draw(static_cast<unsigned int>(particles.MaxParticles()), 0);
 
     ID3D11ShaderResourceView* nullSrv = nullptr;
-    ctx->PSSetShaderResources(0, 1, &nullSrv);
+    ctx->VSSetShaderResources(0, 1, &nullSrv);
+    ctx->PSSetShaderResources(1, 1, &nullSrv);
     ctx->GSSetShader(nullptr, nullptr, 0);
 }
 
@@ -290,8 +248,6 @@ void ParticleRenderer::DestroyResources()
     depthReadState.Reset();
     blendState.Reset();
     constantBuffer.Reset();
-    vertexBuffer.Reset();
-    inputLayout.Reset();
     pixelShader.Reset();
     geometryShader.Reset();
     vertexShader.Reset();

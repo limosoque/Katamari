@@ -12,9 +12,9 @@
 
 class Game;
 
-static constexpr int kMaxDeferredPointLights = 16;
-static constexpr int kMaxDeferredSpotLights = 8;
-static constexpr int kMaxDeferredTrailStamps = 64;
+const int kMaxDeferredPointLights = 16;
+const int kMaxDeferredSpotLights = 8;
+const int kMaxDeferredTrailStamps = 64;
 
 struct DeferredPointLight
 {
@@ -44,6 +44,7 @@ struct DeferredLightingData
     DirectX::XMFLOAT4 CascadeSplits = { 12.0f, 17.0f, 90.0f, 0.0f };
     DirectX::XMFLOAT4 SkyColor = { 0.53f, 0.81f, 0.98f, 1.0f };
     DirectX::XMFLOAT4 TrailColor = { 1.0f, 0.75f, 0.35f, 1.0f };
+    DirectX::XMFLOAT4 DebugFlags = { 0.0f, 0.0f, 0.0f, 0.0f }; // x = cascade color overlay.
     std::array<DirectX::XMFLOAT4X4, kCascadeCount> LightViewProj = {};
     std::vector<DeferredPointLight> PointLights;
     std::vector<DeferredSpotLight> SpotLights;
@@ -87,7 +88,7 @@ private:
         DirectX::XMFLOAT4 SkyColor;
         DirectX::XMFLOAT4 TrailColor;
         DirectX::XMFLOAT4 LightCounts;
-        DirectX::XMFLOAT4 Padding;
+        DirectX::XMFLOAT4 DebugFlags;
         DirectX::XMFLOAT4X4 LightViewProj[kCascadeCount];
         DirectX::XMFLOAT4 PointPositionRange[kMaxDeferredPointLights];
         DirectX::XMFLOAT4 PointColorIntensity[kMaxDeferredPointLights];

@@ -1,5 +1,6 @@
-﻿#include "InputDevice.h"
+#include "InputDevice.h"
 #include "Game.h"
+#include "DisplayWin32.h"
 #include <iostream>
 
 InputDevice::InputDevice(Game* inGame)
@@ -54,15 +55,44 @@ void InputDevice::OnKeyDown(RAWKEYBOARD data)
 
 void InputDevice::OnMouseMove(RAWMOUSE data)
 {
+    if (data.usButtonFlags & RI_MOUSE_LEFT_BUTTON_DOWN)
+    {
+        if (!leftMouseDown)
+        {
+            leftMousePressed = true;
+        }
+        leftMouseDown = true;
+    }
+    if (data.usButtonFlags & RI_MOUSE_LEFT_BUTTON_UP)
+    {
+        leftMouseDown = false;
+    }
+    if (data.usButtonFlags & RI_MOUSE_RIGHT_BUTTON_DOWN)
+    {
+        if (!rightMouseDown)
+        {
+            rightMousePressed = true;
+        }
+        rightMouseDown = true;
+    }
+    if (data.usButtonFlags & RI_MOUSE_RIGHT_BUTTON_UP)
+    {
+        rightMouseDown = false;
+    }
+
     if (data.usFlags == MOUSE_MOVE_RELATIVE)
     {
         MouseOffset.x += static_cast<float>(data.lLastX);
         MouseOffset.y += static_cast<float>(data.lLastY);
     }
 
-	//get mouse absolute position
+    //get mouse client position
     POINT p;
     GetCursorPos(&p);
+    if (game && game->Display)
+    {
+        ScreenToClient(game->Display->hWnd, &p);
+    }
     MousePosition.x = static_cast<float>(p.x);
     MousePosition.y = static_cast<float>(p.y);
 }

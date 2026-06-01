@@ -145,7 +145,7 @@ void ShadowMapHud::UpdateConstantBuffer(int cascadeIndex, int panelCount, int sc
     const float x = PanelMargin + static_cast<float>(cascadeIndex) * (width + PanelPadding);
     const float y = PanelMargin;
 
-    static const std::array<XMFLOAT4, 3> kBorderColors =
+    const std::array<XMFLOAT4, 3> kBorderColors =
     {
         XMFLOAT4(1.0f, 0.25f, 0.25f, 1.0f),
         XMFLOAT4(0.25f, 1.0f, 0.35f, 1.0f),
